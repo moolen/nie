@@ -1,7 +1,10 @@
 package dnsproxy
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"log/slog"
 	"net"
 	"testing"
 
@@ -36,11 +39,121 @@ func TestServeDNS_AuditDeniedHostForwardsAndLearnsARecords(t *testing.T) {
 		Policy:   allowOnly("*.github.com"),
 		Upstream: fakeUpstreamAnswer("example.com.", "203.0.113.10", 60),
 		Trust:    captureTrustWriter(&learned),
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 
 	resp := exchangeLocal(t, srv, question("example.com."))
-	if len(resp.Answer) != 1 || learned[0] != "203.0.113.10" {
+	if len(resp.Answer) != 1 || len(learned) != 1 || learned[0] != "203.0.113.10" {
 		t.Fatalf("answer=%v learned=%v", resp.Answer, learned)
+	}
+}
+
+func TestServeDNS_AllowedHostForwardsUpstream(t *testing.T) {
+	var calls int
+	srv := New(ServerConfig{
+		Mode:   config.ModeEnforce,
+		Policy: allowOnly("*.github.com"),
+		Upstream: fakeUpstream(func(q string) *dns.Msg {
+			calls++
+			return replyWithRecords(question(q), &dns.A{
+				Hdr: dns.RR_Header{
+					Name:   q,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    60,
+				},
+				A: net.ParseIP("203.0.113.20"),
+			})
+		}),
+		Trust: noopTrustWriter{},
+	})
+
+	resp := exchangeLocal(t, srv, question("api.github.com."))
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1", calls)
+	}
+	if resp.Rcode == dns.RcodeRefused {
+		t.Fatalf("Rcode = %d, want not refused", resp.Rcode)
+	}
+}
+
+func TestServeDNS_IgnoresAAAARecordsForTrustLearning(t *testing.T) {
+	var learned []string
+	srv := New(ServerConfig{
+		Mode:   config.ModeAudit,
+		Policy: allowOnly("*.github.com"),
+		Upstream: fakeUpstream(func(q string) *dns.Msg {
+			return replyWithRecords(question(q), &dns.AAAA{
+				Hdr: dns.RR_Header{
+					Name:   q,
+					Rrtype: dns.TypeAAAA,
+					Class:  dns.ClassINET,
+					Ttl:    60,
+				},
+				AAAA: net.ParseIP("2001:db8::1"),
+			})
+		}),
+		Trust: captureTrustWriter(&learned),
+	})
+
+	resp := exchangeLocal(t, srv, question("api.github.com."))
+	if len(resp.Answer) != 1 {
+		t.Fatalf("answer=%v, want 1 AAAA record", resp.Answer)
+	}
+	if len(learned) != 0 {
+		t.Fatalf("learned=%v, want no IPv4 trust entries", learned)
+	}
+}
+
+func TestServeDNS_NormalizesSingleQuestionHostnameBeforePolicyEvaluation(t *testing.T) {
+	var seen string
+	srv := New(ServerConfig{
+		Mode: config.ModeEnforce,
+		Policy: policyFunc(func(host string) bool {
+			seen = host
+			return host == "api.github.com"
+		}),
+		Upstream: fakeUpstream(func(q string) *dns.Msg {
+			return replyWithRecords(question(q))
+		}),
+		Trust: noopTrustWriter{},
+	})
+
+	req := new(dns.Msg)
+	req.Question = []dns.Question{{
+		Name:   " API.GITHUB.COM. ",
+		Qtype:  dns.TypeA,
+		Qclass: dns.ClassINET,
+	}}
+
+	resp := exchangeLocal(t, srv, req)
+	if seen != "api.github.com" {
+		t.Fatalf("policy saw %q, want %q", seen, "api.github.com")
+	}
+	if resp.Rcode == dns.RcodeRefused {
+		t.Fatalf("Rcode = %d, want not refused", resp.Rcode)
+	}
+}
+
+func TestServeDNS_AuditDeniedLogsWouldDenyDNS(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	prev := slog.Default()
+	slog.SetDefault(logger)
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	srv := New(ServerConfig{
+		Mode:   config.ModeAudit,
+		Policy: allowOnly("*.github.com"),
+		Upstream: fakeUpstream(func(q string) *dns.Msg {
+			return replyWithRecords(question(q))
+		}),
+		Trust: noopTrustWriter{},
+	})
+
+	_ = exchangeLocal(t, srv, question("example.com."))
+	if !bytes.Contains(buf.Bytes(), []byte("would_deny_dns")) {
+		t.Fatalf("log output %q does not contain would_deny_dns", buf.String())
 	}
 }
 
@@ -79,20 +192,27 @@ func fakeUpstreamAnswer(name, ip string, ttl uint32) *fakeUpstreamAnswerFunc {
 }
 
 func (u *fakeUpstreamAnswerFunc) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
+	return replyWithRecords(req, &dns.A{
+		Hdr: dns.RR_Header{
+			Name:   u.name,
+			Rrtype: dns.TypeA,
+			Class:  dns.ClassINET,
+			Ttl:    u.ttl,
+		},
+		A: net.ParseIP(u.ip),
+	}), nil
+}
+
+type policyFunc func(string) bool
+
+func (f policyFunc) Allows(host string) bool { return f(host) }
+
+func replyWithRecords(req *dns.Msg, records ...dns.RR) *dns.Msg {
 	resp := new(dns.Msg)
 	resp.SetReply(req)
-	resp.Answer = []dns.RR{
-		&dns.A{
-			Hdr: dns.RR_Header{
-				Name:   u.name,
-				Rrtype: dns.TypeA,
-				Class:  dns.ClassINET,
-				Ttl:    u.ttl,
-			},
-			A: net.ParseIP(u.ip),
-		},
-	}
-	return resp, nil
+	resp.Answer = []dns.RR{}
+	resp.Answer = append(resp.Answer, records...)
+	return resp
 }
 
 type noopTrustWriter struct{}
@@ -143,4 +263,3 @@ func (w *responseRecorder) Close() error                { return nil }
 func (w *responseRecorder) TsigStatus() error           { return nil }
 func (w *responseRecorder) TsigTimersOnly(bool)         {}
 func (w *responseRecorder) Hijack()                     {}
-

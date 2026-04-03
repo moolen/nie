@@ -2,7 +2,6 @@ package dnsproxy
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"time"
 
@@ -42,7 +41,7 @@ func (noopTrustWriterImpl) Allow(context.Context, ebpf.TrustEntry) error { retur
 func New(cfg ServerConfig) *Server {
 	l := cfg.Logger
 	if l == nil {
-		l = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
+		l = slog.Default()
 	}
 
 	maxTTL := cfg.MaxTTL

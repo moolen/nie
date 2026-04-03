@@ -2,10 +2,12 @@ module github.com/moolen/nie
 
 go 1.24.0
 
-require gopkg.in/yaml.v3 v3.0.1
+require (
+	github.com/miekg/dns v1.1.72
+	gopkg.in/yaml.v3 v3.0.1
+)
 
 require (
-	github.com/miekg/dns v1.1.72 // indirect
 	golang.org/x/mod v0.31.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect

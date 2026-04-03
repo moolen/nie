@@ -1,10 +1,5 @@
 test:
-	@packages=$$(go list ./...); \
-	if [ -z "$$packages" ]; then \
-		echo "no packages to test"; \
-	else \
-		go test ./...; \
-	fi
+	go test ./...
 
 generate:
 	go generate ./internal/ebpf

@@ -14,7 +14,7 @@ struct allow_key {
 };
 
 struct allow_value {
-	__u64 expires_at_unix;
+	__u64 expires_at_mono_ns;
 };
 
 struct event {

@@ -8,7 +8,8 @@
 
 #include "common.h"
 
-const volatile __u32 cfg_bypass_mark = 0;
+/* Sentinel default: do not bypass anything until userspace config sets this. */
+const volatile __u32 cfg_bypass_mark = 0xffffffff;
 const volatile __u32 cfg_mode = NIE_MODE_ENFORCE;
 
 struct {
@@ -25,13 +26,7 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } events SEC(".maps");
 
-static __always_inline __u64 now_unix_seconds(void)
-{
-	/* NOTE: CLOCK_TAI is close to Unix time but differs by leap seconds. */
-	return bpf_ktime_get_tai_ns() / 1000000000ULL;
-}
-
-static __always_inline int parse_ipv4_dst(struct __sk_buff *skb, __u32 *dst_ipv4)
+static __always_inline int parse_ipv4(struct __sk_buff *skb, struct iphdr **out_ip)
 {
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
@@ -52,7 +47,7 @@ static __always_inline int parse_ipv4_dst(struct __sk_buff *skb, __u32 *dst_ipv4
 	if ((void *)ip + (ip->ihl * 4) > data_end)
 		return -1;
 
-	*dst_ipv4 = ip->daddr;
+	*out_ip = ip;
 	return 0;
 }
 
@@ -71,24 +66,25 @@ static __always_inline void emit_event(__u32 dst_ipv4, __u32 reason, __u32 actio
 SEC("classifier/egress")
 int nie_egress(struct __sk_buff *skb)
 {
-	if (cfg_bypass_mark != 0 && skb->mark == cfg_bypass_mark)
+	if (skb->mark == cfg_bypass_mark)
 		return TC_ACT_OK;
 
-	__u32 dst_ipv4 = 0;
-	if (parse_ipv4_dst(skb, &dst_ipv4) != 0)
+	struct iphdr *ip = 0;
+	if (parse_ipv4(skb, &ip) != 0)
 		return TC_ACT_OK;
 
 	struct allow_key key = {};
-	__builtin_memcpy(key.addr, &dst_ipv4, sizeof(dst_ipv4));
+	/* Copy bytes directly from packet (network order) to match userspace netip.Addr.As4(). */
+	__builtin_memcpy(key.addr, &ip->daddr, sizeof(ip->daddr));
 
 	struct allow_value *val = bpf_map_lookup_elem(&allow_map, &key);
-	__u64 now = now_unix_seconds();
-	if (val && val->expires_at_unix >= now)
+	__u64 now = bpf_ktime_get_ns();
+	if (val && val->expires_at_mono_ns >= now)
 		return TC_ACT_OK;
 
 	__u32 reason = val ? NIE_REASON_EXPIRED : NIE_REASON_NOT_ALLOWED;
 	__u32 action = (cfg_mode == NIE_MODE_ENFORCE) ? TC_ACT_SHOT : TC_ACT_OK;
-	emit_event(dst_ipv4, reason, action);
+	emit_event(bpf_ntohl(ip->daddr), reason, action);
 	return action;
 }
 

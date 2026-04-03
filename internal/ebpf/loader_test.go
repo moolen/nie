@@ -34,6 +34,10 @@ func TestPinnedPaths(t *testing.T) {
 
 func TestAllowStoresIPv4Key(t *testing.T) {
 	fake := newFakeMap()
+	prev := monotonicNowNs
+	monotonicNowNs = func() (uint64, error) { return 1000, nil }
+	t.Cleanup(func() { monotonicNowNs = prev })
+
 	now := func() time.Time { return time.Unix(1700000000, 0) }
 	writer := NewTrustWriter(fake, now)
 
@@ -49,8 +53,8 @@ func TestAllowStoresIPv4Key(t *testing.T) {
 	if _, ok := fake.entries[wantKey]; !ok {
 		t.Fatal("IPv4 key not written to fake map")
 	}
-	if got := fake.entries[wantKey]; got.ExpiresAtUnix != uint64(expiresAt.Unix()) {
-		t.Fatalf("expiry = %d, want %d", got.ExpiresAtUnix, expiresAt.Unix())
+	if got := fake.entries[wantKey]; got.ExpiresAtMonoNs != 1000+600*1_000_000_000 {
+		t.Fatalf("expiry = %d, want %d", got.ExpiresAtMonoNs, 1000+600*1_000_000_000)
 	}
 }
 
@@ -74,6 +78,10 @@ func TestAllowRejectsAlreadyExpired(t *testing.T) {
 
 func TestAllowAcceptsExpiryEqualNow(t *testing.T) {
 	fake := newFakeMap()
+	prev := monotonicNowNs
+	monotonicNowNs = func() (uint64, error) { return 4242, nil }
+	t.Cleanup(func() { monotonicNowNs = prev })
+
 	now := func() time.Time { return time.Unix(1700000600, 0) }
 	writer := NewTrustWriter(fake, now)
 
@@ -88,22 +96,23 @@ func TestAllowAcceptsExpiryEqualNow(t *testing.T) {
 	wantKey := allowKey{203, 0, 113, 10}
 	if got, ok := fake.entries[wantKey]; !ok {
 		t.Fatal("IPv4 key not written to fake map")
-	} else if got.ExpiresAtUnix != uint64(expiresAt.Unix()) {
-		t.Fatalf("expiry = %d, want %d", got.ExpiresAtUnix, expiresAt.Unix())
+	} else if got.ExpiresAtMonoNs != 4242 {
+		t.Fatalf("expiry = %d, want %d", got.ExpiresAtMonoNs, 4242)
 	}
 }
 
-func TestMapValueEncodingIncludesExpiryUnixSeconds(t *testing.T) {
+func TestMapValueEncodingIncludesExpiryMonotonicNanoseconds(t *testing.T) {
+	now := time.Unix(1700000000, 0)
 	entry := TrustEntry{
 		IPv4:      netip.MustParseAddr("203.0.113.10"),
 		ExpiresAt: time.Unix(1700000600, 0),
 	}
 
-	key, value := encodeEntry(entry)
+	key, value := encodeEntry(entry, now, 1000)
 	if key != [4]byte{203, 0, 113, 10} {
 		t.Fatalf("key = %v", key)
 	}
-	if value.ExpiresAtUnix != 1700000600 {
-		t.Fatalf("ExpiresAtUnix = %d", value.ExpiresAtUnix)
+	if value.ExpiresAtMonoNs != 1000+600*1_000_000_000 {
+		t.Fatalf("ExpiresAtMonoNs = %d", value.ExpiresAtMonoNs)
 	}
 }

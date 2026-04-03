@@ -19,8 +19,8 @@ type bpfAllowKey struct {
 }
 
 type bpfAllowValue struct {
-	_             structs.HostLayout
-	ExpiresAtUnix uint64
+	_               structs.HostLayout
+	ExpiresAtMonoNs uint64
 }
 
 // loadBpf returns the embedded CollectionSpec for bpf.

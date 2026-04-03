@@ -8,16 +8,16 @@ import (
 )
 
 type fakeMap struct {
-	entries map[[4]byte]uint64
+	entries map[allowKey]allowVal
 }
 
 func newFakeMap() *fakeMap {
 	return &fakeMap{
-		entries: make(map[[4]byte]uint64),
+		entries: make(map[allowKey]allowVal),
 	}
 }
 
-func (m *fakeMap) Put(key [4]byte, value uint64) error {
+func (m *fakeMap) Put(key allowKey, value allowVal) error {
 	m.entries[key] = value
 	return nil
 }
@@ -45,11 +45,12 @@ func TestAllowStoresIPv4Key(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Allow() error = %v", err)
 	}
-	if _, ok := fake.entries[[4]byte{203, 0, 113, 10}]; !ok {
+	wantKey := allowKey{Addr: [4]uint8{203, 0, 113, 10}}
+	if _, ok := fake.entries[wantKey]; !ok {
 		t.Fatal("IPv4 key not written to fake map")
 	}
-	if got, ok := fake.entries[[4]byte{203, 0, 113, 10}]; !ok || got != uint64(expiresAt.Unix()) {
-		t.Fatalf("expiry = %d, want %d", got, expiresAt.Unix())
+	if got := fake.entries[wantKey]; got.ExpiresAtUnix != uint64(expiresAt.Unix()) {
+		t.Fatalf("expiry = %d, want %d", got.ExpiresAtUnix, expiresAt.Unix())
 	}
 }
 

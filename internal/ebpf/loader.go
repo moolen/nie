@@ -19,8 +19,19 @@ func PinnedPaths(root string) Paths {
 	}
 }
 
+// allowKey/allowVal mirror bpf/include/common.h structs:
+//   struct allow_key { __u8 addr[4]; };
+//   struct allow_val { __u64 expires_at_unix; };
+type allowKey struct {
+	Addr [4]uint8
+}
+
+type allowVal struct {
+	ExpiresAtUnix uint64
+}
+
 type allowMap interface {
-	Put(key [4]byte, expiresAtUnix uint64) error
+	Put(key allowKey, value allowVal) error
 }
 
 type trustWriter struct {
@@ -54,7 +65,9 @@ func (w *trustWriter) Allow(_ context.Context, entry TrustEntry) error {
 	if nowUnix := w.now().Unix(); expiresAtUnixSigned <= nowUnix {
 		return fmt.Errorf("entry expired at %d (now %d)", expiresAtUnixSigned, nowUnix)
 	}
-	expiresAtUnix := uint64(expiresAtUnixSigned)
 
-	return w.m.Put(key, expiresAtUnix)
+	return w.m.Put(
+		allowKey{Addr: [4]uint8(key)},
+		allowVal{ExpiresAtUnix: uint64(expiresAtUnixSigned)},
+	)
 }

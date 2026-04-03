@@ -25,14 +25,18 @@ type compiledPattern struct {
 
 // New builds a hostname policy engine that accepts:
 // - exact hostnames (for example: "github.com")
-// - "*" (any non-empty hostname)
+// - "*" (any non-empty valid hostname)
 // - "*.example.com" (exactly one label under example.com)
 // - "**.example.com" (one or more labels under example.com)
 func New(patterns []string) (*Engine, error) {
 	compiled := make([]compiledPattern, 0, len(patterns))
 	for _, rawPattern := range patterns {
 		if hasDotOnlyWildcardSuffix(rawPattern) {
-			return nil, fmt.Errorf("invalid hostname pattern %q: unsupported wildcard form", NormalizeHostname(rawPattern))
+			return nil, fmt.Errorf(
+				"invalid hostname pattern %q: normalizes to %q, which is unsupported because it would broaden to a bare wildcard",
+				rawPattern,
+				NormalizeHostname(rawPattern),
+			)
 		}
 
 		pattern := NormalizeHostname(rawPattern)
@@ -50,8 +54,8 @@ func New(patterns []string) (*Engine, error) {
 	return &Engine{patterns: compiled}, nil
 }
 
-// Allows expects DNS hostnames that normalize to ASCII LDH labels (a-z, 0-9, hyphen).
-// Invalid or empty normalized inputs are denied.
+// Allows normalizes and validates DNS hostnames as ASCII LDH labels (a-z, 0-9,
+// hyphen). Invalid or empty normalized inputs are denied.
 func (e *Engine) Allows(host string) bool {
 	host = NormalizeHostname(host)
 	if host == "" {
@@ -131,6 +135,10 @@ func trimSubdomainPrefix(host, base string) (string, bool) {
 }
 
 func isValidHostname(host string) bool {
+	if len(host) > maxDNSNameLength {
+		return false
+	}
+
 	labels := strings.Split(host, ".")
 	if len(labels) == 0 {
 		return false
@@ -145,6 +153,9 @@ func isValidHostname(host string) bool {
 
 func isValidLabel(label string) bool {
 	if label == "" {
+		return false
+	}
+	if len(label) > maxDNSLabelLength {
 		return false
 	}
 	if label[0] == '-' || label[len(label)-1] == '-' {

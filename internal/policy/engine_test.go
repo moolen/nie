@@ -110,8 +110,14 @@ func TestEngineRejectsInvalidPatternWithContext(t *testing.T) {
 		if err == nil {
 			t.Fatalf("New(%q) error = nil, want non-nil", pattern)
 		}
+		if !strings.Contains(err.Error(), pattern) {
+			t.Fatalf("New(%q) error = %q, want message containing raw pattern", pattern, err)
+		}
 		if !strings.Contains(err.Error(), NormalizeHostname(pattern)) {
 			t.Fatalf("New(%q) error = %q, want message containing normalized pattern", pattern, err)
+		}
+		if (pattern == "*." || pattern == "*...") && !strings.Contains(err.Error(), "broaden") {
+			t.Fatalf("New(%q) error = %q, want broadening explanation", pattern, err)
 		}
 	}
 }
@@ -147,5 +153,33 @@ func TestEngineDeniesInvalidHostnameForms(t *testing.T) {
 		if engine.Allows(host) {
 			t.Fatalf("Allows(%q) = true, want false", host)
 		}
+	}
+}
+
+func TestEngineDeniesHostnameWithLabelLongerThan63(t *testing.T) {
+	engine, err := New([]string{"*"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	host := strings.Repeat("a", 64) + ".example.com"
+	if engine.Allows(host) {
+		t.Fatalf("Allows(%q) = true, want false", host)
+	}
+}
+
+func TestEngineDeniesHostnameLongerThan253(t *testing.T) {
+	engine, err := New([]string{"*"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	label := strings.Repeat("a", 63)
+	host := strings.Join([]string{label, label, label, label}, ".")
+	if len(host) <= 253 {
+		t.Fatalf("test setup bug: len(host) = %d, want > 253", len(host))
+	}
+	if engine.Allows(host) {
+		t.Fatalf("Allows(host len %d) = true, want false", len(host))
 	}
 }

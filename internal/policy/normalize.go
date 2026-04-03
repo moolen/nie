@@ -2,6 +2,11 @@ package policy
 
 import "strings"
 
+const (
+	maxDNSLabelLength = 63
+	maxDNSNameLength  = 253
+)
+
 func NormalizeHostname(host string) string {
 	host = strings.TrimSpace(host)
 	host = strings.TrimRight(host, ".")

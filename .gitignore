@@ -1,2 +1,11 @@
 .worktrees/
 nie
+
+# Go build/test artifacts
+*.test
+*.out
+coverage.out
+
+# Generated eBPF artifacts
+internal/ebpf/*.o
+internal/ebpf/*_bpf*.go

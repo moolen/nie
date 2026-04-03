@@ -95,9 +95,27 @@ func TestServiceStartPropagatesError(t *testing.T) {
 		if err := svc.Start(context.Background()); err == nil {
 			t.Fatalf("Start() error = nil, want non-nil")
 		}
-		if diff := cmp.Diff([]string{"ebpf:start", "redirect:start"}, calls); diff != "" {
+		if diff := cmp.Diff([]string{"ebpf:start", "redirect:start", "ebpf:stop"}, calls); diff != "" {
+			t.Fatalf("call order mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("dns", func(t *testing.T) {
+		var calls []string
+		dnsLC := fakeLifecycle("dns", &calls)
+		dnsLC.startErr = errors.New("boom")
+
+		svc := Service{
+			Redirect: fakeLifecycle("redirect", &calls),
+			EBPF:     fakeLifecycle("ebpf", &calls),
+			DNS:      dnsLC,
+		}
+
+		if err := svc.Start(context.Background()); err == nil {
+			t.Fatalf("Start() error = nil, want non-nil")
+		}
+		if diff := cmp.Diff([]string{"ebpf:start", "redirect:start", "dns:start", "redirect:stop", "ebpf:stop"}, calls); diff != "" {
 			t.Fatalf("call order mismatch (-want +got):\n%s", diff)
 		}
 	})
 }
-

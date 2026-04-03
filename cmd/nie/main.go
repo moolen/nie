@@ -52,11 +52,22 @@ type dnsListenerLifecycle struct {
 }
 
 func (d *dnsListenerLifecycle) Start(context.Context) error {
-	d.udp = &dns.Server{Addr: d.addr, Net: "udp", Handler: d.handler}
-	d.tcp = &dns.Server{Addr: d.addr, Net: "tcp", Handler: d.handler}
+	pc, err := net.ListenPacket("udp", d.addr)
+	if err != nil {
+		return err
+	}
 
-	go func() { _ = d.udp.ListenAndServe() }()
-	go func() { _ = d.tcp.ListenAndServe() }()
+	ln, err := net.Listen("tcp", d.addr)
+	if err != nil {
+		_ = pc.Close()
+		return err
+	}
+
+	d.udp = &dns.Server{PacketConn: pc, Handler: d.handler}
+	d.tcp = &dns.Server{Listener: ln, Handler: d.handler}
+
+	go func() { _ = d.udp.ActivateAndServe() }()
+	go func() { _ = d.tcp.ActivateAndServe() }()
 	return nil
 }
 
@@ -112,6 +123,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	if len(cfg.DNS.Upstreams) == 0 {
+		_, _ = fmt.Fprintln(os.Stderr, "load config: dns.upstreams must contain at least one upstream")
+		os.Exit(1)
+	}
 	upstream := dnsClientUpstream{addr: cfg.DNS.Upstreams[0]}
 
 	dnsHandler := dnsproxy.New(dnsproxy.ServerConfig{

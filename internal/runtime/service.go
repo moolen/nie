@@ -14,18 +14,32 @@ type Service struct {
 }
 
 func (s Service) Start(ctx context.Context) error {
+	var started []Lifecycle
+	rollback := func() {
+		rollbackCtx := context.WithoutCancel(ctx)
+		for i := len(started) - 1; i >= 0; i-- {
+			_ = started[i].Stop(rollbackCtx)
+		}
+	}
+
 	if s.EBPF != nil {
 		if err := s.EBPF.Start(ctx); err != nil {
 			return err
 		}
+		started = append(started, s.EBPF)
 	}
 	if s.Redirect != nil {
 		if err := s.Redirect.Start(ctx); err != nil {
+			rollback()
 			return err
 		}
+		started = append(started, s.Redirect)
 	}
 	if s.DNS != nil {
-		return s.DNS.Start(ctx)
+		if err := s.DNS.Start(ctx); err != nil {
+			rollback()
+			return err
+		}
 	}
 	return nil
 }
@@ -46,4 +60,3 @@ func (s Service) Stop(ctx context.Context) error {
 	}
 	return nil
 }
-

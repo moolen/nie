@@ -61,6 +61,25 @@ func TestServiceStopOrdersDependencies(t *testing.T) {
 	}
 }
 
+func TestServiceStopContinuesAfterError(t *testing.T) {
+	var calls []string
+	dnsLC := fakeLifecycle("dns", &calls)
+	dnsLC.stopErr = errors.New("boom")
+
+	svc := Service{
+		Redirect: fakeLifecycle("redirect", &calls),
+		EBPF:     fakeLifecycle("ebpf", &calls),
+		DNS:      dnsLC,
+	}
+
+	if err := svc.Stop(context.Background()); err == nil {
+		t.Fatalf("Stop() error = nil, want non-nil")
+	}
+	if diff := cmp.Diff([]string{"dns:stop", "redirect:stop", "ebpf:stop"}, calls); diff != "" {
+		t.Fatalf("call order mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestServiceStartPropagatesError(t *testing.T) {
 	t.Run("ebpf", func(t *testing.T) {
 		var calls []string

@@ -45,18 +45,22 @@ func (s Service) Start(ctx context.Context) error {
 }
 
 func (s Service) Stop(ctx context.Context) error {
+	var firstErr error
+
 	if s.DNS != nil {
-		if err := s.DNS.Stop(ctx); err != nil {
-			return err
+		if err := s.DNS.Stop(ctx); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 	if s.Redirect != nil {
-		if err := s.Redirect.Stop(ctx); err != nil {
-			return err
+		if err := s.Redirect.Stop(ctx); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 	if s.EBPF != nil {
-		return s.EBPF.Stop(ctx)
+		if err := s.EBPF.Stop(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return nil
+	return firstErr
 }

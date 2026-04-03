@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -106,6 +107,9 @@ policy:
 	_, err := Load(raw)
 	if err == nil {
 		t.Fatal("Load() error = nil, want unknown field error")
+	}
+	if !strings.Contains(err.Error(), "field unknown not found") {
+		t.Fatalf("Load() error = %v, want unknown-field reason", err)
 	}
 }
 
@@ -483,6 +487,9 @@ policy:
 	if err == nil {
 		t.Fatal("Load() error = nil, want duplicate key error")
 	}
+	if !strings.Contains(err.Error(), "mapping key") || !strings.Contains(err.Error(), "already defined") {
+		t.Fatalf("Load() error = %v, want duplicate-key reason", err)
+	}
 }
 
 func TestLoadConfig_RejectsDuplicateNestedKeys(t *testing.T) {
@@ -501,18 +508,22 @@ policy:
 	if err == nil {
 		t.Fatal("Load() error = nil, want duplicate key error")
 	}
+	if !strings.Contains(err.Error(), "mapping key") || !strings.Contains(err.Error(), "already defined") {
+		t.Fatalf("Load() error = %v, want duplicate-key reason", err)
+	}
 }
 
 func TestLoadConfig_RejectsInvalidDNSListenHostPort(t *testing.T) {
 	tests := []struct {
-		name   string
-		listen string
+		name      string
+		listen    string
+		wantError string
 	}{
-		{name: "missing port", listen: "127.0.0.1"},
-		{name: "non numeric port", listen: "127.0.0.1:http"},
-		{name: "zero port", listen: "127.0.0.1:0"},
-		{name: "out of range port", listen: "127.0.0.1:70000"},
-		{name: "missing host", listen: ":1053"},
+		{name: "missing port", listen: "127.0.0.1", wantError: "missing port in address"},
+		{name: "non numeric port", listen: "127.0.0.1:http", wantError: "numeric port"},
+		{name: "zero port", listen: "127.0.0.1:0", wantError: "1-65535"},
+		{name: "out of range port", listen: "127.0.0.1:70000", wantError: "1-65535"},
+		{name: "missing host", listen: ":1053", wantError: "must include a host"},
 	}
 
 	for _, tt := range tests {
@@ -533,20 +544,27 @@ policy:
 			if err == nil {
 				t.Fatal("Load() error = nil, want validation error")
 			}
+			if !strings.Contains(err.Error(), "dns.listen") {
+				t.Fatalf("Load() error = %v, want dns.listen field context", err)
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("Load() error = %v, want reason containing %q", err, tt.wantError)
+			}
 		})
 	}
 }
 
 func TestLoadConfig_RejectsInvalidDNSUpstreamsHostPort(t *testing.T) {
 	tests := []struct {
-		name     string
-		upstream string
+		name      string
+		upstream  string
+		wantError string
 	}{
-		{name: "missing port", upstream: "1.1.1.1"},
-		{name: "non numeric port", upstream: "1.1.1.1:http"},
-		{name: "zero port", upstream: "1.1.1.1:0"},
-		{name: "out of range port", upstream: "1.1.1.1:70000"},
-		{name: "missing host", upstream: ":53"},
+		{name: "missing port", upstream: "1.1.1.1", wantError: "missing port in address"},
+		{name: "non numeric port", upstream: "1.1.1.1:http", wantError: "numeric port"},
+		{name: "zero port", upstream: "1.1.1.1:0", wantError: "1-65535"},
+		{name: "out of range port", upstream: "1.1.1.1:70000", wantError: "1-65535"},
+		{name: "missing host", upstream: `":53"`, wantError: "must include a host"},
 	}
 
 	for _, tt := range tests {
@@ -567,6 +585,12 @@ policy:
 			if err == nil {
 				t.Fatal("Load() error = nil, want validation error")
 			}
+			if !strings.Contains(err.Error(), "dns.upstreams") {
+				t.Fatalf("Load() error = %v, want dns.upstreams field context", err)
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("Load() error = %v, want reason containing %q", err, tt.wantError)
+			}
 		})
 	}
 }
@@ -585,5 +609,47 @@ policy:
 `))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
+	}
+}
+
+func TestLoadConfig_WhitespaceOnlyInputReturnsDomainError(t *testing.T) {
+	_, err := Load([]byte("   \n\t  "))
+	if !errors.Is(err, ErrEmptyConfig) {
+		t.Fatalf("Load(whitespace) error = %v, want errors.Is(err, ErrEmptyConfig)", err)
+	}
+}
+
+func TestLoadConfig_PolicyAllowNullOrEmptyYieldsNonNilSlice(t *testing.T) {
+	tests := []struct {
+		name       string
+		allowValue string
+	}{
+		{name: "null", allowValue: "null"},
+		{name: "empty", allowValue: "[]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ` + tt.allowValue + `
+`))
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.Policy.Allow == nil {
+				t.Fatal("Policy.Allow = nil, want non-nil slice")
+			}
+			if len(cfg.Policy.Allow) != 0 {
+				t.Fatalf("len(Policy.Allow) = %d, want 0", len(cfg.Policy.Allow))
+			}
+		})
 	}
 }

@@ -41,6 +41,9 @@ var ErrEmptyConfig = errors.New("config is empty")
 
 func Load(raw []byte) (Config, error) {
 	var cfg Config
+	if strings.TrimSpace(string(raw)) == "" {
+		return Config{}, ErrEmptyConfig
+	}
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
@@ -121,17 +124,17 @@ func (c *Config) Validate() error {
 func validateHostPort(field, value string) error {
 	host, portStr, err := net.SplitHostPort(value)
 	if err != nil {
-		return fmt.Errorf("%s must be a valid host:port value", field)
+		return fmt.Errorf("%s value %q must be a valid host:port value: %w", field, value, err)
 	}
 	if host == "" {
-		return fmt.Errorf("%s must include a host", field)
+		return fmt.Errorf("%s value %q must include a host", field, value)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		return fmt.Errorf("%s must include a numeric port", field)
+		return fmt.Errorf("%s value %q must include a numeric port: %w", field, value, err)
 	}
 	if port < 1 || port > 65535 {
-		return fmt.Errorf("%s port must be in range 1-65535", field)
+		return fmt.Errorf("%s value %q has out-of-range port %d (must be 1-65535)", field, value, port)
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -40,6 +41,13 @@ func Load(raw []byte) (Config, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
 		return Config{}, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return Config{}, err
+		}
+		return Config{}, errors.New("config must contain exactly one YAML document")
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err

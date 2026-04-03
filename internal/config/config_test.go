@@ -209,3 +209,163 @@ policy:
 		})
 	}
 }
+
+func TestLoadConfig_RejectsInvalidMode(t *testing.T) {
+	_, err := Load([]byte(`
+mode: monitor
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+}
+
+func TestLoadConfig_RejectsMissingDNSListen(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+}
+
+func TestLoadConfig_RejectsMissingOrEmptyDNSUpstreams(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+	}{
+		{
+			name: "missing",
+			config: `
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+`,
+		},
+		{
+			name: "empty",
+			config: `
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: []
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load([]byte(tt.config))
+			if err == nil {
+				t.Fatal("Load() error = nil, want validation error")
+			}
+		})
+	}
+}
+
+func TestLoadConfig_RejectsInvalidPolicyDefault(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: allow
+  allow: ["github.com"]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+}
+
+func TestLoadConfig_RejectsNestedUnknownYAMLKeys(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+  unknownNested: true
+policy:
+  default: deny
+  allow: ["github.com"]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want unknown field error")
+	}
+}
+
+func TestLoadConfig_RejectsTrailingYAMLDocumentsOrContent(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "multi-document",
+			raw: `
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+---
+mode: audit
+`,
+		},
+		{
+			name: "trailing-content",
+			raw: `
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+true
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load([]byte(tt.raw))
+			if err == nil {
+				t.Fatal("Load() error = nil, want trailing content error")
+			}
+		})
+	}
+}

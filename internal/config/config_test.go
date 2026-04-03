@@ -653,3 +653,63 @@ policy:
 		})
 	}
 }
+
+func TestLoadConfig_RejectsDNSListenBindAllWithoutExplicitHost(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: ":1053"
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "dns.listen") || !strings.Contains(err.Error(), "must include a host") {
+		t.Fatalf("Load() error = %v, want explicit-host requirement", err)
+	}
+}
+
+func TestLoadConfig_InvalidDNSUpstreamErrorMentionsEntryIndex(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53, 1.1.1.1]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "dns.upstreams[1]") {
+		t.Fatalf("Load() error = %v, want failing upstream index in error", err)
+	}
+}
+
+func TestLoadConfig_InvalidPolicyAllowErrorMentionsEntryIndex(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com", "   "]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "policy.allow[1]") {
+		t.Fatalf("Load() error = %v, want failing allow index in error", err)
+	}
+}

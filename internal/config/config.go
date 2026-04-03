@@ -41,7 +41,7 @@ var ErrEmptyConfig = errors.New("config is empty")
 
 func Load(raw []byte) (Config, error) {
 	var cfg Config
-	if strings.TrimSpace(string(raw)) == "" {
+	if len(bytes.TrimSpace(raw)) == 0 {
 		return Config{}, ErrEmptyConfig
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
@@ -77,7 +77,7 @@ func (c *Config) Validate() error {
 		for i, allow := range c.Policy.Allow {
 			trimmed := strings.TrimSpace(allow)
 			if trimmed == "" {
-				return errors.New("policy.allow must not contain empty entries")
+				return fmt.Errorf("policy.allow[%d] must not be empty", i)
 			}
 			c.Policy.Allow[i] = trimmed
 		}
@@ -104,11 +104,11 @@ func (c *Config) Validate() error {
 	if len(c.DNS.Upstreams) == 0 {
 		return errors.New("dns.upstreams must contain at least one upstream")
 	}
-	for _, upstream := range c.DNS.Upstreams {
+	for i, upstream := range c.DNS.Upstreams {
 		if upstream == "" {
-			return errors.New("dns.upstreams must not contain empty entries")
+			return fmt.Errorf("dns.upstreams[%d] must not be empty", i)
 		}
-		if err := validateHostPort("dns.upstreams", upstream); err != nil {
+		if err := validateHostPort(fmt.Sprintf("dns.upstreams[%d]", i), upstream); err != nil {
 			return err
 		}
 	}

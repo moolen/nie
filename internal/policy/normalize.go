@@ -7,6 +7,9 @@ const (
 	maxDNSNameLength  = 253
 )
 
+// NormalizeHostname trims surrounding whitespace, strips trailing dots, and
+// lowercases the input. It does not validate hostname syntax or perform IDNA
+// processing.
 func NormalizeHostname(host string) string {
 	host = strings.TrimSpace(host)
 	host = strings.TrimRight(host, ".")
@@ -16,12 +19,11 @@ func NormalizeHostname(host string) string {
 
 func hasDotOnlyWildcardSuffix(pattern string) bool {
 	pattern = strings.TrimSpace(strings.ToLower(pattern))
-	if !strings.HasPrefix(pattern, "*") || pattern == "*" {
+	if !strings.HasPrefix(pattern, "*.") {
 		return false
 	}
 
-	rest := strings.TrimLeft(pattern, "*")
-	return rest != "" && isAllDots(rest)
+	return isAllDots(strings.TrimPrefix(pattern, "*"))
 }
 
 func isAllDots(s string) bool {

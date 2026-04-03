@@ -98,6 +98,7 @@ func TestEngineRejectsInvalidPatternWithContext(t *testing.T) {
 	tests := []string{
 		"*.",
 		"*...",
+		" API.*.GitHub.Com. ",
 		"api.*.github.com",
 		"***.github.com",
 		"foo*bar.github.com",

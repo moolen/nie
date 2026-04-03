@@ -31,22 +31,32 @@ type compiledPattern struct {
 func New(patterns []string) (*Engine, error) {
 	compiled := make([]compiledPattern, 0, len(patterns))
 	for _, rawPattern := range patterns {
+		normalizedPattern := NormalizeHostname(rawPattern)
+
 		if hasDotOnlyWildcardSuffix(rawPattern) {
 			return nil, fmt.Errorf(
-				"invalid hostname pattern %q: normalizes to %q, which is unsupported because it would broaden to a bare wildcard",
+				"invalid hostname pattern %q (normalized: %q): unsupported because it would broaden to a bare wildcard",
 				rawPattern,
-				NormalizeHostname(rawPattern),
+				normalizedPattern,
 			)
 		}
 
-		pattern := NormalizeHostname(rawPattern)
-		if pattern == "" {
-			return nil, fmt.Errorf("empty hostname pattern after normalization: %q", rawPattern)
+		if normalizedPattern == "" {
+			return nil, fmt.Errorf(
+				"invalid hostname pattern %q (normalized: %q): empty hostname pattern after normalization",
+				rawPattern,
+				normalizedPattern,
+			)
 		}
 
-		parsed, err := parsePattern(pattern)
+		parsed, err := parsePattern(normalizedPattern)
 		if err != nil {
-			return nil, fmt.Errorf("invalid hostname pattern %q: %w", pattern, err)
+			return nil, fmt.Errorf(
+				"invalid hostname pattern %q (normalized: %q): %w",
+				rawPattern,
+				normalizedPattern,
+				err,
+			)
 		}
 		compiled = append(compiled, parsed)
 	}

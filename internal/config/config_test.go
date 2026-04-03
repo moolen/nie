@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestLoadConfig_Valid(t *testing.T) {
 	raw := []byte(`
@@ -367,5 +370,35 @@ true
 				t.Fatal("Load() error = nil, want trailing content error")
 			}
 		})
+	}
+}
+
+func TestLoadConfig_TrimsModeAndPolicyDefault(t *testing.T) {
+	cfg, err := Load([]byte(`
+mode: " enforce "
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: " deny "
+  allow: ["github.com"]
+`))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Mode != ModeEnforce {
+		t.Fatalf("Mode = %q, want %q", cfg.Mode, ModeEnforce)
+	}
+	if cfg.Policy.Default != "deny" {
+		t.Fatalf("Policy.Default = %q, want %q", cfg.Policy.Default, "deny")
+	}
+}
+
+func TestLoadConfig_EmptyInputReturnsDomainError(t *testing.T) {
+	_, err := Load(nil)
+	if !errors.Is(err, ErrEmptyConfig) {
+		t.Fatalf("Load(nil) error = %v, want errors.Is(err, ErrEmptyConfig)", err)
 	}
 }

@@ -35,11 +35,16 @@ type Policy struct {
 	Allow   []string `yaml:"allow"`
 }
 
+var ErrEmptyConfig = errors.New("config is empty")
+
 func Load(raw []byte) (Config, error) {
 	var cfg Config
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
+		if err == io.EOF {
+			return Config{}, ErrEmptyConfig
+		}
 		return Config{}, err
 	}
 	var extra any
@@ -56,8 +61,10 @@ func Load(raw []byte) (Config, error) {
 }
 
 func (c *Config) Validate() error {
+	c.Mode = Mode(strings.TrimSpace(string(c.Mode)))
 	c.Interface = strings.TrimSpace(c.Interface)
 	c.DNS.Listen = strings.TrimSpace(c.DNS.Listen)
+	c.Policy.Default = strings.TrimSpace(c.Policy.Default)
 
 	if c.Policy.Allow == nil {
 		c.Policy.Allow = []string{}

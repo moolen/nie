@@ -43,12 +43,17 @@ func (n noopLifecycle) Stop(context.Context) error {
 
 // dnsListenerLifecycle adapts internal/dnsproxy (which is a dns.Handler) into a
 // runnable network listener lifecycle for the CLI.
+type dnsServer interface {
+	ActivateAndServe() error
+	ShutdownContext(context.Context) error
+}
+
 type dnsListenerLifecycle struct {
 	addr    string
 	handler dns.Handler
 
-	udp *dns.Server
-	tcp *dns.Server
+	udp dnsServer
+	tcp dnsServer
 }
 
 func (d *dnsListenerLifecycle) Start(context.Context) error {
@@ -72,15 +77,19 @@ func (d *dnsListenerLifecycle) Start(context.Context) error {
 }
 
 func (d *dnsListenerLifecycle) Stop(ctx context.Context) error {
+	var firstErr error
+
 	if d.tcp != nil {
-		if err := d.tcp.ShutdownContext(ctx); err != nil {
-			return err
+		if err := d.tcp.ShutdownContext(ctx); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 	if d.udp != nil {
-		return d.udp.ShutdownContext(ctx)
+		if err := d.udp.ShutdownContext(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return nil
+	return firstErr
 }
 
 type dnsClientUpstream struct {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -35,7 +36,9 @@ type Policy struct {
 
 func Load(raw []byte) (Config, error) {
 	var cfg Config
-	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil {
 		return Config{}, err
 	}
 	if err := cfg.Validate(); err != nil {
@@ -45,9 +48,25 @@ func Load(raw []byte) (Config, error) {
 }
 
 func (c *Config) Validate() error {
+	c.Interface = strings.TrimSpace(c.Interface)
+	c.DNS.Listen = strings.TrimSpace(c.DNS.Listen)
+
 	if c.Policy.Allow == nil {
 		c.Policy.Allow = []string{}
+	} else {
+		for i, allow := range c.Policy.Allow {
+			trimmed := strings.TrimSpace(allow)
+			if trimmed == "" {
+				return errors.New("policy.allow must not contain empty entries")
+			}
+			c.Policy.Allow[i] = trimmed
+		}
 	}
+
+	for i, upstream := range c.DNS.Upstreams {
+		c.DNS.Upstreams[i] = strings.TrimSpace(upstream)
+	}
+
 	switch c.Mode {
 	case ModeEnforce, ModeAudit:
 	default:
@@ -63,7 +82,7 @@ func (c *Config) Validate() error {
 		return errors.New("dns.upstreams must contain at least one upstream")
 	}
 	for _, upstream := range c.DNS.Upstreams {
-		if strings.TrimSpace(upstream) == "" {
+		if upstream == "" {
 			return errors.New("dns.upstreams must not contain empty entries")
 		}
 	}

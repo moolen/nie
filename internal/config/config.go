@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -93,6 +95,9 @@ func (c *Config) Validate() error {
 	if c.DNS.Listen == "" {
 		return errors.New("dns.listen must be set")
 	}
+	if err := validateHostPort("dns.listen", c.DNS.Listen); err != nil {
+		return err
+	}
 	if len(c.DNS.Upstreams) == 0 {
 		return errors.New("dns.upstreams must contain at least one upstream")
 	}
@@ -100,12 +105,33 @@ func (c *Config) Validate() error {
 		if upstream == "" {
 			return errors.New("dns.upstreams must not contain empty entries")
 		}
+		if err := validateHostPort("dns.upstreams", upstream); err != nil {
+			return err
+		}
 	}
 	if c.DNS.Mark <= 0 {
 		return errors.New("dns.mark must be a positive non-zero value")
 	}
 	if c.Policy.Default != "deny" {
 		return fmt.Errorf("invalid policy.default %q", c.Policy.Default)
+	}
+	return nil
+}
+
+func validateHostPort(field, value string) error {
+	host, portStr, err := net.SplitHostPort(value)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid host:port value", field)
+	}
+	if host == "" {
+		return fmt.Errorf("%s must include a host", field)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return fmt.Errorf("%s must include a numeric port", field)
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("%s port must be in range 1-65535", field)
 	}
 	return nil
 }

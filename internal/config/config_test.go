@@ -466,3 +466,124 @@ policy:
 		t.Fatalf("DNS.Mark = %d, want %d", cfg.DNS.Mark, 4242)
 	}
 }
+
+func TestLoadConfig_RejectsDuplicateTopLevelKeys(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+mode: audit
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want duplicate key error")
+	}
+}
+
+func TestLoadConfig_RejectsDuplicateNestedKeys(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  listen: 0.0.0.0:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want duplicate key error")
+	}
+}
+
+func TestLoadConfig_RejectsInvalidDNSListenHostPort(t *testing.T) {
+	tests := []struct {
+		name   string
+		listen string
+	}{
+		{name: "missing port", listen: "127.0.0.1"},
+		{name: "non numeric port", listen: "127.0.0.1:http"},
+		{name: "zero port", listen: "127.0.0.1:0"},
+		{name: "out of range port", listen: "127.0.0.1:70000"},
+		{name: "missing host", listen: ":1053"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: ` + tt.listen + `
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+`)
+
+			_, err := Load(raw)
+			if err == nil {
+				t.Fatal("Load() error = nil, want validation error")
+			}
+		})
+	}
+}
+
+func TestLoadConfig_RejectsInvalidDNSUpstreamsHostPort(t *testing.T) {
+	tests := []struct {
+		name     string
+		upstream string
+	}{
+		{name: "missing port", upstream: "1.1.1.1"},
+		{name: "non numeric port", upstream: "1.1.1.1:http"},
+		{name: "zero port", upstream: "1.1.1.1:0"},
+		{name: "out of range port", upstream: "1.1.1.1:70000"},
+		{name: "missing host", upstream: ":53"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [` + tt.upstream + `]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+`)
+
+			_, err := Load(raw)
+			if err == nil {
+				t.Fatal("Load() error = nil, want validation error")
+			}
+		})
+	}
+}
+
+func TestLoadConfig_AcceptsValidDNSHostPortValues(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: dns.local:1053
+  upstreams: [1.1.1.1:53, dns.google:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+`))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+}

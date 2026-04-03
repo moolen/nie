@@ -101,6 +101,9 @@ func (c *Config) Validate() error {
 			return errors.New("dns.upstreams must not contain empty entries")
 		}
 	}
+	if c.DNS.Mark <= 0 {
+		return errors.New("dns.mark must be a positive non-zero value")
+	}
 	if c.Policy.Default != "deny" {
 		return fmt.Errorf("invalid policy.default %q", c.Policy.Default)
 	}

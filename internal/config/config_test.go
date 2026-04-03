@@ -402,3 +402,67 @@ func TestLoadConfig_EmptyInputReturnsDomainError(t *testing.T) {
 		t.Fatalf("Load(nil) error = %v, want errors.Is(err, ErrEmptyConfig)", err)
 	}
 }
+
+func TestLoadConfig_RejectsMissingOrZeroDNSMark(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+	}{
+		{
+			name: "missing",
+			config: `
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+policy:
+  default: deny
+  allow: ["github.com"]
+`,
+		},
+		{
+			name: "zero",
+			config: `
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 0
+policy:
+  default: deny
+  allow: ["github.com"]
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load([]byte(tt.config))
+			if err == nil {
+				t.Fatal("Load() error = nil, want validation error")
+			}
+		})
+	}
+}
+
+func TestLoadConfig_AcceptsPositiveDNSMark(t *testing.T) {
+	cfg, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+`))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DNS.Mark != 4242 {
+		t.Fatalf("DNS.Mark = %d, want %d", cfg.DNS.Mark, 4242)
+	}
+}

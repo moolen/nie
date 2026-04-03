@@ -96,6 +96,8 @@ func TestEngineRejectsEmptyNormalizedPattern(t *testing.T) {
 
 func TestEngineRejectsInvalidPatternWithContext(t *testing.T) {
 	tests := []string{
+		"*.",
+		"*...",
 		"api.*.github.com",
 		"***.github.com",
 		"foo*bar.github.com",
@@ -114,6 +116,16 @@ func TestEngineRejectsInvalidPatternWithContext(t *testing.T) {
 	}
 }
 
+func TestEngineAllowsNormalizesInputHostname(t *testing.T) {
+	engine, err := New([]string{"api.github.com"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if !engine.Allows("API.GitHub.Com.") {
+		t.Fatal("Allows(API.GitHub.Com.) = false, want true")
+	}
+}
+
 func TestEngineDeniesEmptyNormalizedHost(t *testing.T) {
 	engine, err := New([]string{"*"})
 	if err != nil {
@@ -121,5 +133,19 @@ func TestEngineDeniesEmptyNormalizedHost(t *testing.T) {
 	}
 	if engine.Allows(" . ") {
 		t.Fatal("Allows(\" . \") = true, want false")
+	}
+}
+
+func TestEngineDeniesInvalidHostnameForms(t *testing.T) {
+	engine, err := New([]string{"*"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	tests := []string{"api_github.com", "bücher.de"}
+	for _, host := range tests {
+		if engine.Allows(host) {
+			t.Fatalf("Allows(%q) = true, want false", host)
+		}
 	}
 }

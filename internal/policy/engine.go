@@ -31,6 +31,10 @@ type compiledPattern struct {
 func New(patterns []string) (*Engine, error) {
 	compiled := make([]compiledPattern, 0, len(patterns))
 	for _, rawPattern := range patterns {
+		if hasDotOnlyWildcardSuffix(rawPattern) {
+			return nil, fmt.Errorf("invalid hostname pattern %q: unsupported wildcard form", NormalizeHostname(rawPattern))
+		}
+
 		pattern := NormalizeHostname(rawPattern)
 		if pattern == "" {
 			return nil, fmt.Errorf("empty hostname pattern after normalization: %q", rawPattern)
@@ -46,6 +50,8 @@ func New(patterns []string) (*Engine, error) {
 	return &Engine{patterns: compiled}, nil
 }
 
+// Allows expects DNS hostnames that normalize to ASCII LDH labels (a-z, 0-9, hyphen).
+// Invalid or empty normalized inputs are denied.
 func (e *Engine) Allows(host string) bool {
 	host = NormalizeHostname(host)
 	if host == "" {

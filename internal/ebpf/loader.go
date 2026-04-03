@@ -42,10 +42,19 @@ func (w *trustWriter) Allow(_ context.Context, entry TrustEntry) error {
 	if !entry.IPv4.Is4() {
 		return fmt.Errorf("invalid IPv4: %q", entry.IPv4.String())
 	}
+	if entry.ExpiresAt.IsZero() {
+		return fmt.Errorf("invalid ExpiresAt: zero time")
+	}
 
 	key := entry.IPv4.As4()
-	expiresAtUnix := uint64(entry.ExpiresAt.Unix())
+	expiresAtUnixSigned := entry.ExpiresAt.Unix()
+	if expiresAtUnixSigned <= 0 {
+		return fmt.Errorf("invalid ExpiresAt: %s", entry.ExpiresAt.UTC().Format(time.RFC3339))
+	}
+	if nowUnix := w.now().Unix(); expiresAtUnixSigned <= nowUnix {
+		return fmt.Errorf("entry expired at %d (now %d)", expiresAtUnixSigned, nowUnix)
+	}
+	expiresAtUnix := uint64(expiresAtUnixSigned)
 
 	return w.m.Put(key, expiresAtUnix)
 }
-

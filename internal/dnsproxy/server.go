@@ -12,6 +12,8 @@ import (
 	"github.com/moolen/nie/internal/policy"
 )
 
+const defaultUpstreamTimeout = 5 * time.Second
+
 type Upstream interface {
 	Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error)
 }
@@ -32,11 +34,16 @@ type Server struct {
 	trust    ebpf.TrustWriter
 	maxTTL   time.Duration
 	logger   *slog.Logger
+	timeout  time.Duration
 }
 
 type noopTrustWriterImpl struct{}
 
 func (noopTrustWriterImpl) Allow(context.Context, ebpf.TrustEntry) error { return nil }
+
+type denyAllPolicy struct{}
+
+func (denyAllPolicy) Allows(string) bool { return false }
 
 func New(cfg ServerConfig) *Server {
 	l := cfg.Logger
@@ -54,13 +61,20 @@ func New(cfg ServerConfig) *Server {
 		tw = noopTrustWriterImpl{}
 	}
 
+	p := cfg.Policy
+	if p == nil {
+		p = denyAllPolicy{}
+		l.Warn("missing_dns_policy_default_deny")
+	}
+
 	return &Server{
 		mode:     cfg.Mode,
-		policy:   cfg.Policy,
+		policy:   p,
 		upstream: cfg.Upstream,
 		trust:    tw,
 		maxTTL:   maxTTL,
 		logger:   l,
+		timeout:  defaultUpstreamTimeout,
 	}
 }
 
@@ -69,12 +83,15 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 
-	host := ""
-	if len(req.Question) == 1 {
-		host = policy.NormalizeHostname(req.Question[0].Name)
+	if len(req.Question) != 1 {
+		resp := new(dns.Msg)
+		resp.SetRcode(req, dns.RcodeFormatError)
+		_ = w.WriteMsg(resp)
+		return
 	}
+	host := policy.NormalizeHostname(req.Question[0].Name)
 
-	allowed := s.policy != nil && s.policy.Allows(host)
+	allowed := s.policy.Allows(host)
 	denied := !allowed
 
 	if denied && s.mode == config.ModeEnforce {
@@ -100,7 +117,10 @@ func (s *Server) exchangeUpstream(req *dns.Msg) *dns.Msg {
 		return resp
 	}
 
-	resp, err := s.upstream.Exchange(context.Background(), req)
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+
+	resp, err := s.upstream.Exchange(ctx, req)
 	if err != nil || resp == nil {
 		fallback := new(dns.Msg)
 		fallback.SetRcode(req, dns.RcodeServerFailure)

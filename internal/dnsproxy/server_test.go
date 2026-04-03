@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 
@@ -157,6 +158,94 @@ func TestServeDNS_AuditDeniedLogsWouldDenyDNS(t *testing.T) {
 	}
 }
 
+func TestServeDNS_MalformedQuestionSetsFormErr(t *testing.T) {
+	tests := []struct {
+		name string
+		req  *dns.Msg
+	}{
+		{
+			name: "empty question list",
+			req:  new(dns.Msg),
+		},
+		{
+			name: "multiple questions",
+			req: &dns.Msg{
+				Question: []dns.Question{
+					{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET},
+					{Name: "api.github.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := New(ServerConfig{
+				Mode:   config.ModeEnforce,
+				Policy: allowOnly("*.github.com"),
+				Upstream: fakeUpstream(func(q string) *dns.Msg {
+					t.Fatalf("upstream should not be called for malformed request")
+					return nil
+				}),
+				Trust: noopTrustWriter{},
+			})
+
+			resp := exchangeLocal(t, srv, tt.req)
+			if resp.Rcode != dns.RcodeFormatError {
+				t.Fatalf("Rcode = %d, want %d", resp.Rcode, dns.RcodeFormatError)
+			}
+		})
+	}
+}
+
+func TestServeDNS_UpstreamExchangeUsesTimeoutContext(t *testing.T) {
+	var gotDeadline time.Time
+	srv := New(ServerConfig{
+		Mode:   config.ModeEnforce,
+		Policy: allowOnly("*.github.com"),
+		Upstream: fakeUpstreamWithContext(func(ctx context.Context, q string) *dns.Msg {
+			var ok bool
+			gotDeadline, ok = ctx.Deadline()
+			if !ok {
+				t.Fatalf("expected upstream context deadline")
+			}
+			return replyWithRecords(question(q))
+		}),
+		Trust: noopTrustWriter{},
+	})
+
+	_ = exchangeLocal(t, srv, question("api.github.com."))
+	if gotDeadline.IsZero() {
+		t.Fatal("upstream context deadline was not recorded")
+	}
+	if time.Until(gotDeadline) <= 0 {
+		t.Fatalf("deadline %v is not in the future", gotDeadline)
+	}
+}
+
+func TestNew_NilPolicyDefaultsToDenyAllAndLogsWarning(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	srv := New(ServerConfig{
+		Mode: config.ModeEnforce,
+		Upstream: fakeUpstream(func(q string) *dns.Msg {
+			t.Fatalf("upstream should not be called for nil policy in enforce mode")
+			return nil
+		}),
+		Trust:  noopTrustWriter{},
+		Logger: logger,
+	})
+
+	resp := exchangeLocal(t, srv, question("api.github.com."))
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("Rcode = %d, want %d", resp.Rcode, dns.RcodeRefused)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("missing_dns_policy_default_deny")) {
+		t.Fatalf("log output %q does not contain missing_dns_policy_default_deny", buf.String())
+	}
+}
+
 func allowOnly(patterns ...string) interface{ Allows(string) bool } {
 	eng, err := policy.New(patterns)
 	if err != nil {
@@ -179,6 +268,22 @@ func (u *fakeUpstreamFunc) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg
 		q = req.Question[0].Name
 	}
 	return u.fn(q), nil
+}
+
+type fakeUpstreamWithContextFunc struct {
+	fn func(context.Context, string) *dns.Msg
+}
+
+func fakeUpstreamWithContext(fn func(context.Context, string) *dns.Msg) *fakeUpstreamWithContextFunc {
+	return &fakeUpstreamWithContextFunc{fn: fn}
+}
+
+func (u *fakeUpstreamWithContextFunc) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
+	var q string
+	if len(req.Question) > 0 {
+		q = req.Question[0].Name
+	}
+	return u.fn(ctx, q), nil
 }
 
 type fakeUpstreamAnswerFunc struct {

@@ -1,6 +1,9 @@
 package policy
 
-import "path"
+import (
+	"fmt"
+	"path"
+)
 
 type Engine struct {
 	patterns []string
@@ -8,10 +11,13 @@ type Engine struct {
 
 func New(patterns []string) (*Engine, error) {
 	normalized := make([]string, 0, len(patterns))
-	for _, pattern := range patterns {
-		pattern = NormalizeHostname(pattern)
+	for _, rawPattern := range patterns {
+		pattern := NormalizeHostname(rawPattern)
+		if pattern == "" {
+			return nil, fmt.Errorf("empty hostname pattern after normalization: %q", rawPattern)
+		}
 		if _, err := path.Match(pattern, ""); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("invalid hostname pattern %q: %w", pattern, err)
 		}
 		normalized = append(normalized, pattern)
 	}
@@ -21,6 +27,9 @@ func New(patterns []string) (*Engine, error) {
 
 func (e *Engine) Allows(host string) bool {
 	host = NormalizeHostname(host)
+	if host == "" {
+		return false
+	}
 	for _, pattern := range e.patterns {
 		if ok, _ := path.Match(pattern, host); ok {
 			return true

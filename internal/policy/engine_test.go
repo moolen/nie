@@ -45,6 +45,42 @@ func TestEngineWildcardDoesNotMatchApex(t *testing.T) {
 	}
 }
 
+func TestEngineSingleLabelWildcardDoesNotMatchMultiLevelSubdomain(t *testing.T) {
+	engine, err := New([]string{"*.github.com"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if engine.Allows("a.b.github.com") {
+		t.Fatal("Allows(a.b.github.com) = true, want false")
+	}
+}
+
+func TestEngineMultiLabelWildcardMatchesOneOrMoreSubdomainLabels(t *testing.T) {
+	engine, err := New([]string{"**.github.com"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if !engine.Allows("a.github.com") {
+		t.Fatal("Allows(a.github.com) = false, want true")
+	}
+	if !engine.Allows("a.b.github.com") {
+		t.Fatal("Allows(a.b.github.com) = false, want true")
+	}
+	if engine.Allows("github.com") {
+		t.Fatal("Allows(github.com) = true, want false")
+	}
+}
+
+func TestEngineBareWildcardMatchesAnyNonEmptyHostname(t *testing.T) {
+	engine, err := New([]string{"*"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if !engine.Allows("api.github.com") {
+		t.Fatal("Allows(api.github.com) = false, want true")
+	}
+}
+
 func TestEngineRejectsEmptyNormalizedPattern(t *testing.T) {
 	tests := []string{"", "   ", ".", "..."}
 	for _, pattern := range tests {
@@ -59,12 +95,22 @@ func TestEngineRejectsEmptyNormalizedPattern(t *testing.T) {
 }
 
 func TestEngineRejectsInvalidPatternWithContext(t *testing.T) {
-	_, err := New([]string{" [abc "})
-	if err == nil {
-		t.Fatal("New() error = nil, want non-nil")
+	tests := []string{
+		"api.*.github.com",
+		"***.github.com",
+		"foo*bar.github.com",
+		"*github.com",
+		"**github.com",
+		"github.*.com",
 	}
-	if !strings.Contains(err.Error(), "[abc") {
-		t.Fatalf("New() error = %q, want message containing %q", err, "[abc")
+	for _, pattern := range tests {
+		_, err := New([]string{pattern})
+		if err == nil {
+			t.Fatalf("New(%q) error = nil, want non-nil", pattern)
+		}
+		if !strings.Contains(err.Error(), NormalizeHostname(pattern)) {
+			t.Fatalf("New(%q) error = %q, want message containing normalized pattern", pattern, err)
+		}
 	}
 }
 

@@ -8,16 +8,16 @@ import (
 )
 
 type fakeMap struct {
-	entries map[allowKey]allowVal
+	entries map[allowKey]allowValue
 }
 
 func newFakeMap() *fakeMap {
 	return &fakeMap{
-		entries: make(map[allowKey]allowVal),
+		entries: make(map[allowKey]allowValue),
 	}
 }
 
-func (m *fakeMap) Put(key allowKey, value allowVal) error {
+func (m *fakeMap) Put(key allowKey, value allowValue) error {
 	m.entries[key] = value
 	return nil
 }
@@ -45,7 +45,7 @@ func TestAllowStoresIPv4Key(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Allow() error = %v", err)
 	}
-	wantKey := allowKey{Addr: [4]uint8{203, 0, 113, 10}}
+	wantKey := allowKey{203, 0, 113, 10}
 	if _, ok := fake.entries[wantKey]; !ok {
 		t.Fatal("IPv4 key not written to fake map")
 	}
@@ -69,5 +69,20 @@ func TestAllowRejectsAlreadyExpired(t *testing.T) {
 	}
 	if len(fake.entries) != 0 {
 		t.Fatalf("fake map has %d entries, want 0", len(fake.entries))
+	}
+}
+
+func TestMapValueEncodingIncludesExpiryUnixSeconds(t *testing.T) {
+	entry := TrustEntry{
+		IPv4:      netip.MustParseAddr("203.0.113.10"),
+		ExpiresAt: time.Unix(1700000600, 0),
+	}
+
+	key, value := encodeEntry(entry)
+	if key != [4]byte{203, 0, 113, 10} {
+		t.Fatalf("key = %v", key)
+	}
+	if value.ExpiresAtUnix != 1700000600 {
+		t.Fatalf("ExpiresAtUnix = %d", value.ExpiresAtUnix)
 	}
 }

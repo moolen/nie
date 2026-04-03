@@ -19,19 +19,21 @@ func PinnedPaths(root string) Paths {
 	}
 }
 
-// allowKey/allowVal mirror bpf/include/common.h structs:
+// allowKey/allowValue mirror bpf/include/common.h structs:
 //   struct allow_key { __u8 addr[4]; };
-//   struct allow_val { __u64 expires_at_unix; };
-type allowKey struct {
-	Addr [4]uint8
-}
+//   struct allow_value { __u64 expires_at_unix; };
+type allowKey = [4]byte
 
-type allowVal struct {
+type allowValue struct {
 	ExpiresAtUnix uint64
 }
 
 type allowMap interface {
-	Put(key allowKey, value allowVal) error
+	Put(key allowKey, value allowValue) error
+}
+
+func encodeEntry(entry TrustEntry) (allowKey, allowValue) {
+	return entry.IPv4.As4(), allowValue{ExpiresAtUnix: uint64(entry.ExpiresAt.Unix())}
 }
 
 type trustWriter struct {
@@ -57,7 +59,6 @@ func (w *trustWriter) Allow(_ context.Context, entry TrustEntry) error {
 		return fmt.Errorf("invalid ExpiresAt: zero time")
 	}
 
-	key := entry.IPv4.As4()
 	expiresAtUnixSigned := entry.ExpiresAt.Unix()
 	if expiresAtUnixSigned <= 0 {
 		return fmt.Errorf("invalid ExpiresAt: %s", entry.ExpiresAt.UTC().Format(time.RFC3339))
@@ -66,8 +67,6 @@ func (w *trustWriter) Allow(_ context.Context, entry TrustEntry) error {
 		return fmt.Errorf("entry expired at %d (now %d)", expiresAtUnixSigned, nowUnix)
 	}
 
-	return w.m.Put(
-		allowKey{Addr: [4]uint8(key)},
-		allowVal{ExpiresAtUnix: uint64(expiresAtUnixSigned)},
-	)
+	key, value := encodeEntry(entry)
+	return w.m.Put(key, value)
 }

@@ -15,5 +15,6 @@ dns:
 policy:
   default: deny
   allow:
+    - "*.github.com"
     - github.com
 ```

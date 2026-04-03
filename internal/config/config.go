@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -60,6 +61,11 @@ func (c *Config) Validate() error {
 	}
 	if len(c.DNS.Upstreams) == 0 {
 		return errors.New("dns.upstreams must contain at least one upstream")
+	}
+	for _, upstream := range c.DNS.Upstreams {
+		if strings.TrimSpace(upstream) == "" {
+			return errors.New("dns.upstreams must not contain empty entries")
+		}
 	}
 	if c.Policy.Default != "deny" {
 		return fmt.Errorf("invalid policy.default %q", c.Policy.Default)

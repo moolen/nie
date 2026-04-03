@@ -83,7 +83,7 @@ int nie_egress(struct __sk_buff *skb)
 
 	struct allow_value *val = bpf_map_lookup_elem(&allow_map, &key);
 	__u64 now = now_unix_seconds();
-	if (val && val->expires_at_unix > now)
+	if (val && val->expires_at_unix >= now)
 		return TC_ACT_OK;
 
 	__u32 reason = val ? NIE_REASON_EXPIRED : NIE_REASON_NOT_ALLOWED;
@@ -93,4 +93,3 @@ int nie_egress(struct __sk_buff *skb)
 }
 
 char LICENSE[] SEC("license") = "GPL";
-

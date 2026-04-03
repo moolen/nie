@@ -59,7 +59,7 @@ func TestAllowRejectsAlreadyExpired(t *testing.T) {
 	now := func() time.Time { return time.Unix(1700000600, 0) }
 	writer := NewTrustWriter(fake, now)
 
-	expiresAt := time.Unix(1700000600, 0)
+	expiresAt := time.Unix(1700000599, 0)
 	err := writer.Allow(context.Background(), TrustEntry{
 		IPv4:      netip.MustParseAddr("203.0.113.10"),
 		ExpiresAt: expiresAt,
@@ -69,6 +69,27 @@ func TestAllowRejectsAlreadyExpired(t *testing.T) {
 	}
 	if len(fake.entries) != 0 {
 		t.Fatalf("fake map has %d entries, want 0", len(fake.entries))
+	}
+}
+
+func TestAllowAcceptsExpiryEqualNow(t *testing.T) {
+	fake := newFakeMap()
+	now := func() time.Time { return time.Unix(1700000600, 0) }
+	writer := NewTrustWriter(fake, now)
+
+	expiresAt := time.Unix(1700000600, 0)
+	err := writer.Allow(context.Background(), TrustEntry{
+		IPv4:      netip.MustParseAddr("203.0.113.10"),
+		ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		t.Fatalf("Allow() error = %v", err)
+	}
+	wantKey := allowKey{203, 0, 113, 10}
+	if got, ok := fake.entries[wantKey]; !ok {
+		t.Fatal("IPv4 key not written to fake map")
+	} else if got.ExpiresAtUnix != uint64(expiresAt.Unix()) {
+		t.Fatalf("expiry = %d, want %d", got.ExpiresAtUnix, expiresAt.Unix())
 	}
 }
 

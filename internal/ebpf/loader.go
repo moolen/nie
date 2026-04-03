@@ -63,7 +63,7 @@ func (w *trustWriter) Allow(_ context.Context, entry TrustEntry) error {
 	if expiresAtUnixSigned <= 0 {
 		return fmt.Errorf("invalid ExpiresAt: %s", entry.ExpiresAt.UTC().Format(time.RFC3339))
 	}
-	if nowUnix := w.now().Unix(); expiresAtUnixSigned <= nowUnix {
+	if nowUnix := w.now().Unix(); expiresAtUnixSigned < nowUnix {
 		return fmt.Errorf("entry expired at %d (now %d)", expiresAtUnixSigned, nowUnix)
 	}
 

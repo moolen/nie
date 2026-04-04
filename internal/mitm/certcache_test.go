@@ -56,12 +56,18 @@ func TestLeafCache_FailsForExpiredOrUnusableCA(t *testing.T) {
 		caNotAfter  time.Time
 		wantError   string
 	}{
-		{
-			name:        "expired ca",
-			caNotBefore: now.Add(-48 * time.Hour),
-			caNotAfter:  now.Add(-time.Hour),
-			wantError:   "certificate authority certificate is expired",
-		},
+	{
+		name:        "expired ca",
+		caNotBefore: now.Add(-48 * time.Hour),
+		caNotAfter:  now.Add(-time.Hour),
+		wantError:   "certificate authority certificate is expired",
+	},
+	{
+		name:        "ca not yet valid",
+		caNotBefore: now.Add(time.Hour),
+		caNotAfter:  now.Add(48 * time.Hour),
+		wantError:   "certificate authority certificate is not valid before",
+	},
 	}
 
 	for _, tt := range tests {

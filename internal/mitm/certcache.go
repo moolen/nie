@@ -65,6 +65,12 @@ func (c *LeafCache) CertificateForHost(host string) (*tls.Certificate, error) {
 
 func (c *LeafCache) issueLeafCertificate(host string) (*tls.Certificate, error) {
 	now := c.now().UTC()
+	if now.Before(c.authority.Cert.NotBefore) {
+		return nil, fmt.Errorf(
+			"certificate authority certificate is not valid before %s",
+			c.authority.Cert.NotBefore.UTC().Format(time.RFC3339),
+		)
+	}
 	if now.After(c.authority.Cert.NotAfter) {
 		return nil, fmt.Errorf(
 			"certificate authority certificate is expired at %s",

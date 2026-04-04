@@ -11,17 +11,24 @@ import (
 )
 
 func TestRenderRulesExactOutput(t *testing.T) {
-	const listenPort = 1053
+	const (
+		dnsListenPort   = 1053
+		httpsListenPort = 9443
+	)
 
 	got := RenderRules(Config{
-		ListenPort: listenPort,
-		Mark:       4242,
+		DNSListenPort:   dnsListenPort,
+		HTTPSListenPort: httpsListenPort,
+		HTTPSPorts:      []int{443, 8443},
+		Mark:            4242,
 	})
 
 	want := fmt.Sprintf(
-		"\n*nat\n-A OUTPUT -p udp --dport 53 -j REDIRECT --to-ports %d\n-A OUTPUT -p tcp --dport 53 -j REDIRECT --to-ports %d\nCOMMIT\n",
-		listenPort,
-		listenPort,
+		"\n*nat\n-A OUTPUT -m mark ! --mark 4242 -p udp --dport 53 -j REDIRECT --to-ports %d\n-A OUTPUT -m mark ! --mark 4242 -p tcp --dport 53 -j REDIRECT --to-ports %d\n-A OUTPUT -m mark ! --mark 4242 -p tcp --dport 443 -j REDIRECT --to-ports %d\n-A OUTPUT -m mark ! --mark 4242 -p tcp --dport 8443 -j REDIRECT --to-ports %d\nCOMMIT\n",
+		dnsListenPort,
+		dnsListenPort,
+		httpsListenPort,
+		httpsListenPort,
 	)
 
 	if got != want {
@@ -35,8 +42,14 @@ func TestRenderRulesExactOutput(t *testing.T) {
 	if !strings.Contains(got, "-p tcp --dport 53") {
 		t.Fatal("missing TCP redirect rule")
 	}
-	if !strings.Contains(got, fmt.Sprintf("--to-ports %d", listenPort)) {
-		t.Fatal("missing redirect to listen port")
+	if !strings.Contains(got, fmt.Sprintf("--to-ports %d", dnsListenPort)) {
+		t.Fatal("missing redirect to DNS listen port")
+	}
+	if !strings.Contains(got, fmt.Sprintf("--dport 443 -j REDIRECT --to-ports %d", httpsListenPort)) {
+		t.Fatal("missing redirect for HTTPS port 443")
+	}
+	if !strings.Contains(got, "-m mark ! --mark 4242") {
+		t.Fatal("missing bypass mark exclusion")
 	}
 }
 
@@ -50,8 +63,10 @@ func TestRenderRulesParseableByIptablesRestore(t *testing.T) {
 	t.Cleanup(cancel)
 
 	rules := RenderRules(Config{
-		ListenPort: 1053,
-		Mark:       4242,
+		DNSListenPort:   1053,
+		HTTPSListenPort: 9443,
+		HTTPSPorts:      []int{443},
+		Mark:            4242,
 	})
 
 	cmd := exec.CommandContext(ctx, iptablesRestorePath, "--test")

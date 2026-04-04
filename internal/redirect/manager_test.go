@@ -9,7 +9,7 @@ import (
 	"github.com/google/nftables/expr"
 )
 
-func TestManagerStartInstallsNftRedirectRules(t *testing.T) {
+func TestManagerStartInstallsDNSAndHTTPSRedirects(t *testing.T) {
 	fakeDetector := &fakeCapabilityDetector{
 		capabilities: HostCapabilities{
 			NFTables:       true,
@@ -18,7 +18,7 @@ func TestManagerStartInstallsNftRedirectRules(t *testing.T) {
 	}
 	fakeBackend := &fakeNFTBackend{}
 
-	manager, err := NewManager(Config{ListenPort: 1053}, Dependencies{
+	manager, err := NewManager(testManagerConfig(), Dependencies{
 		Detector: fakeDetector,
 		Backend:  fakeBackend,
 	})
@@ -40,22 +40,50 @@ func TestManagerStartInstallsNftRedirectRules(t *testing.T) {
 	if install.ChainName != nieChainName {
 		t.Fatalf("install chain = %q, want %q", install.ChainName, nieChainName)
 	}
-	if install.ListenPort != 1053 {
-		t.Fatalf("install listen port = %d, want 1053", install.ListenPort)
+	want := []RedirectRule{
+		{Protocol: protocolUDP, DestinationPort: 53, ListenPort: 1053, BypassMark: 4242},
+		{Protocol: protocolTCP, DestinationPort: 53, ListenPort: 1053, BypassMark: 4242},
+		{Protocol: protocolTCP, DestinationPort: 443, ListenPort: 9443, BypassMark: 4242},
+		{Protocol: protocolTCP, DestinationPort: 8443, ListenPort: 9443, BypassMark: 4242},
 	}
-	if len(install.Redirects) != 2 {
-		t.Fatalf("redirect rule count = %d, want 2", len(install.Redirects))
+	if len(install.Redirects) != len(want) {
+		t.Fatalf("redirect rule count = %d, want %d", len(install.Redirects), len(want))
 	}
-	if install.Redirects[0].Protocol != protocolUDP || install.Redirects[0].DestinationPort != 53 {
-		t.Fatalf("first redirect = %+v, want udp dport 53", install.Redirects[0])
+	for i := range want {
+		if install.Redirects[i] != want[i] {
+			t.Fatalf("redirect[%d] = %+v, want %+v", i, install.Redirects[i], want[i])
+		}
 	}
-	if install.Redirects[1].Protocol != protocolTCP || install.Redirects[1].DestinationPort != 53 {
-		t.Fatalf("second redirect = %+v, want tcp dport 53", install.Redirects[1])
+}
+
+func TestManagerStartInstallsBypassAwareRedirects(t *testing.T) {
+	fakeBackend := &fakeNFTBackend{}
+	manager, err := NewManager(testManagerConfig(), Dependencies{
+		Detector: &fakeCapabilityDetector{
+			capabilities: HostCapabilities{NFTables: true},
+		},
+		Backend: fakeBackend,
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	if len(fakeBackend.installCalls) != 1 {
+		t.Fatalf("install call count = %d, want 1", len(fakeBackend.installCalls))
+	}
+	for i, redirect := range fakeBackend.installCalls[0].Redirects {
+		if redirect.BypassMark != 4242 {
+			t.Fatalf("redirect[%d].BypassMark = %d, want 4242", i, redirect.BypassMark)
+		}
 	}
 }
 
 func TestManagerStartRejectsLegacyIptablesBackend(t *testing.T) {
-	manager, err := NewManager(Config{ListenPort: 1053}, Dependencies{
+	manager, err := NewManager(testManagerConfig(), Dependencies{
 		Detector: &fakeCapabilityDetector{
 			capabilities: HostCapabilities{
 				NFTables:       false,
@@ -75,7 +103,7 @@ func TestManagerStartRejectsLegacyIptablesBackend(t *testing.T) {
 }
 
 func TestManagerStartFailsOnConflictingExistingState(t *testing.T) {
-	manager, err := NewManager(Config{ListenPort: 1053}, Dependencies{
+	manager, err := NewManager(testManagerConfig(), Dependencies{
 		Detector: &fakeCapabilityDetector{
 			capabilities: HostCapabilities{NFTables: true},
 		},
@@ -93,7 +121,7 @@ func TestManagerStartFailsOnConflictingExistingState(t *testing.T) {
 
 func TestManagerStopRemovesNieOwnedObjects(t *testing.T) {
 	fakeBackend := &fakeNFTBackend{}
-	manager, err := NewManager(Config{ListenPort: 1053}, Dependencies{
+	manager, err := NewManager(testManagerConfig(), Dependencies{
 		Detector: &fakeCapabilityDetector{
 			capabilities: HostCapabilities{NFTables: true},
 		},
@@ -124,7 +152,7 @@ func TestManagerStopRemovesNieOwnedObjects(t *testing.T) {
 
 func TestManagerStartPropagatesDetectorFailure(t *testing.T) {
 	detectErr := errors.New("detect failed")
-	manager, err := NewManager(Config{ListenPort: 1053}, Dependencies{
+	manager, err := NewManager(testManagerConfig(), Dependencies{
 		Detector: &fakeCapabilityDetector{err: detectErr},
 		Backend:  &fakeNFTBackend{},
 	})
@@ -140,7 +168,7 @@ func TestManagerStartPropagatesDetectorFailure(t *testing.T) {
 
 func TestManagerStartPropagatesInstallFailure(t *testing.T) {
 	installErr := errors.New("install failed")
-	manager, err := NewManager(Config{ListenPort: 1053}, Dependencies{
+	manager, err := NewManager(testManagerConfig(), Dependencies{
 		Detector: &fakeCapabilityDetector{
 			capabilities: HostCapabilities{NFTables: true},
 		},
@@ -158,7 +186,7 @@ func TestManagerStartPropagatesInstallFailure(t *testing.T) {
 
 func TestManagerStopPropagatesRemoveFailure(t *testing.T) {
 	removeErr := errors.New("remove failed")
-	manager, err := NewManager(Config{ListenPort: 1053}, Dependencies{
+	manager, err := NewManager(testManagerConfig(), Dependencies{
 		Detector: &fakeCapabilityDetector{
 			capabilities: HostCapabilities{NFTables: true},
 		},
@@ -179,7 +207,7 @@ func TestManagerStopPropagatesRemoveFailure(t *testing.T) {
 
 func TestManagerStopClearsStartedAfterConflictCleanup(t *testing.T) {
 	fakeBackend := &fakeNFTBackend{removeErr: ErrConflictingRedirectState}
-	manager, err := NewManager(Config{ListenPort: 1053}, Dependencies{
+	manager, err := NewManager(testManagerConfig(), Dependencies{
 		Detector: &fakeCapabilityDetector{
 			capabilities: HostCapabilities{NFTables: true},
 		},
@@ -208,7 +236,7 @@ func TestManagerStopClearsStartedAfterConflictCleanup(t *testing.T) {
 
 func TestManagerStopIsIdempotent(t *testing.T) {
 	fakeBackend := &fakeNFTBackend{}
-	manager, err := NewManager(Config{ListenPort: 1053}, Dependencies{
+	manager, err := NewManager(testManagerConfig(), Dependencies{
 		Detector: &fakeCapabilityDetector{
 			capabilities: HostCapabilities{NFTables: true},
 		},
@@ -251,10 +279,18 @@ func TestDefaultCapabilityDetectorDetectReturnsErrorOnListTablesFailure(t *testi
 }
 
 func TestRedirectExpressionsUseRedirectSemantics(t *testing.T) {
-	exprs := redirectExpressions(protocolUDP, 53, 1053)
+	exprs := redirectExpressions(protocolUDP, 53, 1053, 4242)
 
-	if len(exprs) != 6 {
-		t.Fatalf("expression count = %d, want 6", len(exprs))
+	if len(exprs) != 8 {
+		t.Fatalf("expression count = %d, want 8", len(exprs))
+	}
+	markMeta, ok := exprs[0].(*expr.Meta)
+	if !ok || markMeta.Key != expr.MetaKeyMARK {
+		t.Fatalf("first expression = %T (%#v), want Meta mark lookup", exprs[0], exprs[0])
+	}
+	markCmp, ok := exprs[1].(*expr.Cmp)
+	if !ok || markCmp.Op != expr.CmpOpNeq {
+		t.Fatalf("second expression = %T (%#v), want mark inequality compare", exprs[1], exprs[1])
 	}
 	if _, ok := exprs[len(exprs)-1].(*expr.Redir); !ok {
 		t.Fatalf("last expression type = %T, want *expr.Redir", exprs[len(exprs)-1])
@@ -342,10 +378,9 @@ func (f *fakeCapabilityDetector) Detect(context.Context) (HostCapabilities, erro
 }
 
 type installCall struct {
-	TableName  string
-	ChainName  string
-	ListenPort uint16
-	Redirects  []RedirectRule
+	TableName string
+	ChainName string
+	Redirects []RedirectRule
 }
 
 type removeCall struct {
@@ -360,12 +395,11 @@ type fakeNFTBackend struct {
 	removeErr    error
 }
 
-func (f *fakeNFTBackend) InstallRedirects(_ context.Context, tableName, chainName string, listenPort uint16, redirects []RedirectRule) error {
+func (f *fakeNFTBackend) InstallRedirects(_ context.Context, tableName, chainName string, redirects []RedirectRule) error {
 	f.installCalls = append(f.installCalls, installCall{
-		TableName:  tableName,
-		ChainName:  chainName,
-		ListenPort: listenPort,
-		Redirects:  append([]RedirectRule(nil), redirects...),
+		TableName: tableName,
+		ChainName: chainName,
+		Redirects: append([]RedirectRule(nil), redirects...),
 	})
 	return f.installErr
 }
@@ -376,4 +410,13 @@ func (f *fakeNFTBackend) RemoveOwnedObjects(_ context.Context, tableName, chainN
 		ChainName: chainName,
 	})
 	return f.removeErr
+}
+
+func testManagerConfig() Config {
+	return Config{
+		DNSListenPort:   1053,
+		HTTPSListenPort: 9443,
+		HTTPSPorts:      []int{443, 8443},
+		Mark:            4242,
+	}
 }

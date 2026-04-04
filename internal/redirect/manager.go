@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/google/nftables"
+	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
 	"golang.org/x/sys/unix"
 )
@@ -35,6 +37,8 @@ const (
 type RedirectRule struct {
 	Protocol        Protocol
 	DestinationPort uint16
+	ListenPort      uint16
+	BypassMark      uint32
 }
 
 type HostCapabilities struct {
@@ -47,7 +51,7 @@ type CapabilityDetector interface {
 }
 
 type NFTBackend interface {
-	InstallRedirects(ctx context.Context, tableName, chainName string, listenPort uint16, redirects []RedirectRule) error
+	InstallRedirects(ctx context.Context, tableName, chainName string, redirects []RedirectRule) error
 	RemoveOwnedObjects(ctx context.Context, tableName, chainName string) error
 }
 
@@ -57,15 +61,24 @@ type Dependencies struct {
 }
 
 type Manager struct {
-	detector   CapabilityDetector
-	backend    NFTBackend
-	listenPort uint16
-	started    bool
+	detector  CapabilityDetector
+	backend   NFTBackend
+	redirects []RedirectRule
+	started   bool
 }
 
 func NewManager(cfg Config, deps Dependencies) (*Manager, error) {
-	if cfg.ListenPort <= 0 || cfg.ListenPort > 65535 {
-		return nil, fmt.Errorf("invalid listen port %d", cfg.ListenPort)
+	if cfg.DNSListenPort <= 0 || cfg.DNSListenPort > 65535 {
+		return nil, fmt.Errorf("invalid dns listen port %d", cfg.DNSListenPort)
+	}
+	if cfg.HTTPSListenPort <= 0 || cfg.HTTPSListenPort > 65535 {
+		return nil, fmt.Errorf("invalid https listen port %d", cfg.HTTPSListenPort)
+	}
+	if cfg.Mark == 0 {
+		return nil, errors.New("invalid bypass mark 0")
+	}
+	if len(cfg.HTTPSPorts) == 0 {
+		return nil, errors.New("https ports must not be empty")
 	}
 
 	detector := deps.Detector
@@ -78,10 +91,15 @@ func NewManager(cfg Config, deps Dependencies) (*Manager, error) {
 		backend = newNativeNFTBackend()
 	}
 
+	redirects, err := redirectRulesForConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Manager{
-		detector:   detector,
-		backend:    backend,
-		listenPort: uint16(cfg.ListenPort),
+		detector:  detector,
+		backend:   backend,
+		redirects: redirects,
 	}, nil
 }
 
@@ -101,11 +119,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		return errors.New("nftables backend is not available")
 	}
 
-	redirects := []RedirectRule{
-		{Protocol: protocolUDP, DestinationPort: 53},
-		{Protocol: protocolTCP, DestinationPort: 53},
-	}
-	if err := m.backend.InstallRedirects(ctx, nieTableName, nieChainName, m.listenPort, redirects); err != nil {
+	if err := m.backend.InstallRedirects(ctx, nieTableName, nieChainName, m.redirects); err != nil {
 		return fmt.Errorf("install nftables redirects: %w", err)
 	}
 
@@ -177,7 +191,7 @@ func newNativeNFTBackend() *nativeNFTBackend {
 	return &nativeNFTBackend{}
 }
 
-func (b *nativeNFTBackend) InstallRedirects(_ context.Context, tableName, chainName string, listenPort uint16, redirects []RedirectRule) error {
+func (b *nativeNFTBackend) InstallRedirects(_ context.Context, tableName, chainName string, redirects []RedirectRule) error {
 	conn := &nftables.Conn{}
 	tables, err := conn.ListTables()
 	if err != nil {
@@ -208,7 +222,7 @@ func (b *nativeNFTBackend) InstallRedirects(_ context.Context, tableName, chainN
 		conn.AddRule(&nftables.Rule{
 			Table:    table,
 			Chain:    chain,
-			Exprs:    redirectExpressions(redirect.Protocol, redirect.DestinationPort, listenPort),
+			Exprs:    redirectExpressions(redirect.Protocol, redirect.DestinationPort, redirect.ListenPort, redirect.BypassMark),
 			UserData: append([]byte(nil), nieOwnedRuleTag...),
 		})
 	}
@@ -257,8 +271,17 @@ func (b *nativeNFTBackend) RemoveOwnedObjects(_ context.Context, tableName, chai
 	return nil
 }
 
-func redirectExpressions(protocol Protocol, destinationPort, listenPort uint16) []expr.Any {
+func redirectExpressions(protocol Protocol, destinationPort, listenPort uint16, bypassMark uint32) []expr.Any {
 	return []expr.Any{
+		&expr.Meta{
+			Key:      expr.MetaKeyMARK,
+			Register: 1,
+		},
+		&expr.Cmp{
+			Op:       expr.CmpOpNeq,
+			Register: 1,
+			Data:     binaryutil.NativeEndian.PutUint32(bypassMark),
+		},
 		&expr.Meta{
 			Key:      expr.MetaKeyL4PROTO,
 			Register: 1,
@@ -339,4 +362,41 @@ func be16(v uint16) []byte {
 	data := make([]byte, 2)
 	binary.BigEndian.PutUint16(data, v)
 	return data
+}
+
+func redirectRulesForConfig(cfg Config) ([]RedirectRule, error) {
+	redirects := []RedirectRule{
+		{
+			Protocol:        protocolUDP,
+			DestinationPort: 53,
+			ListenPort:      uint16(cfg.DNSListenPort),
+			BypassMark:      cfg.Mark,
+		},
+		{
+			Protocol:        protocolTCP,
+			DestinationPort: 53,
+			ListenPort:      uint16(cfg.DNSListenPort),
+			BypassMark:      cfg.Mark,
+		},
+	}
+
+	httpsPorts := append([]int(nil), cfg.HTTPSPorts...)
+	sort.Ints(httpsPorts)
+	seen := make(map[int]struct{}, len(httpsPorts))
+	for _, port := range httpsPorts {
+		if port <= 0 || port > 65535 {
+			return nil, fmt.Errorf("invalid https redirect port %d", port)
+		}
+		if _, ok := seen[port]; ok {
+			return nil, fmt.Errorf("duplicate https redirect port %d", port)
+		}
+		seen[port] = struct{}{}
+		redirects = append(redirects, RedirectRule{
+			Protocol:        protocolTCP,
+			DestinationPort: uint16(port),
+			ListenPort:      uint16(cfg.HTTPSListenPort),
+			BypassMark:      cfg.Mark,
+		})
+	}
+	return redirects, nil
 }

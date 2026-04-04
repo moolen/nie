@@ -75,7 +75,7 @@ static __always_inline int parse_ipv4_dport(struct __sk_buff *skb, struct iphdr 
 	return 0;
 }
 
-static __always_inline void emit_event(__u32 dst_ipv4, __u32 reason, __u32 action)
+static __always_inline void emit_event(__u32 dst_ipv4, __u32 reason, __u32 action, __u8 protocol, __u16 dport)
 {
 	struct event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
 	if (!e)
@@ -84,6 +84,8 @@ static __always_inline void emit_event(__u32 dst_ipv4, __u32 reason, __u32 actio
 	e->dst_ipv4 = dst_ipv4;
 	e->reason = reason;
 	e->action = action;
+	e->protocol = protocol;
+	e->dport = dport;
 	bpf_ringbuf_submit(e, 0);
 }
 
@@ -114,7 +116,7 @@ int nie_egress(struct __sk_buff *skb)
 
 	__u32 reason = val ? NIE_REASON_EXPIRED : NIE_REASON_NOT_ALLOWED;
 	__u32 action = (cfg_mode == NIE_MODE_ENFORCE) ? TC_ACT_SHOT : TC_ACT_OK;
-	emit_event(bpf_ntohl(ip->daddr), reason, action);
+	emit_event(bpf_ntohl(ip->daddr), reason, action, ip->protocol, dport);
 	return action;
 }
 

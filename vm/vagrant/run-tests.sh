@@ -11,4 +11,4 @@ env \
   NIE_VM_E2E="${NIE_VM_E2E:-}" \
   NIE_VM_FIXTURE_ADDR="${NIE_VM_FIXTURE_ADDR:-}" \
   NIE_VM_ALLOWED_HOST="${NIE_VM_ALLOWED_HOST:-}" \
-  go test -tags=integration ./test/... -v
+  go test -tags=integration ./test -run 'TestVM|TestReadVMNieWaitResult|TestStopVMProbeRequiresCleanExit' -v

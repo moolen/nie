@@ -23,12 +23,42 @@ func TestVMEnforceBlocksThenAllowsRealEgress(t *testing.T) {
 	harness := newVMNieHarness(t, vmScenario{mode: "enforce"})
 	run := harness.start(t)
 
-	assertFixtureBlockedBeforeLearning(t, run.fixture.Address, run.waitCh, run.logs)
+	assertFixtureBlockedBeforeLearning(t, fixtureTCPEchoAddr(run.fixture.IP), run.waitCh, run.logs)
+	if got := waitForProbeResults(t, 5*time.Second, func() string {
+		return udpExchangeResult(fixtureUDPEchoAddr(run.fixture.IP), 300*time.Millisecond)
+	}, "error", "timeout"); got == "" {
+		t.Fatal("udp direct probe did not block")
+	}
+	if got := waitForProbeResults(t, 5*time.Second, func() string {
+		return icmpProbeResult(run.fixture.IP, time.Second)
+	}, "error", "timeout"); got == "" {
+		t.Fatal("icmp direct probe did not block")
+	}
+	if got := waitForProbeResults(t, 5*time.Second, func() string {
+		return httpsProbeResult(net.JoinHostPort(run.fixture.IP, "443"), run.blockedHost, 750*time.Millisecond)
+	}, "error", "timeout"); got == "" {
+		t.Fatal("https 443 probe did not block")
+	}
+	if got := waitForProbeResults(t, 5*time.Second, func() string {
+		return httpsProbeResult(net.JoinHostPort(run.fixture.IP, "8443"), run.blockedHost, 750*time.Millisecond)
+	}, "error", "timeout"); got == "" {
+		t.Fatal("https 8443 probe did not block")
+	}
 
 	resp := waitForAnswer(t, run.listenAddr, run.allowedHost+".", run.waitCh, run.logs)
 	assertFixtureLearned(t, resp, run.fixture.IP)
 
-	waitForFixtureReachable(t, run.fixture.Address, run.waitCh, run.logs)
+	waitForFixtureReachable(t, fixtureTCPEchoAddr(run.fixture.IP), run.waitCh, run.logs)
+	if got := waitForProbeResults(t, 5*time.Second, func() string {
+		return udpExchangeResult(fixtureUDPEchoAddr(run.fixture.IP), 300*time.Millisecond)
+	}, "success"); got != "success" {
+		t.Fatalf("udp learned result = %q, want success", got)
+	}
+	if got := waitForProbeResults(t, 5*time.Second, func() string {
+		return icmpProbeResult(run.fixture.IP, time.Second)
+	}, "success"); got != "success" {
+		t.Fatalf("icmp learned result = %q, want success", got)
+	}
 
 	harness.stop(t, run)
 }
@@ -53,13 +83,52 @@ func TestVMAuditLogsWouldDenyDNSAndEgress(t *testing.T) {
 	})
 	run := harness.start(t)
 
-	waitForFixtureReachable(t, run.fixture.Address, run.waitCh, run.logs)
-	waitForLogLine(t, run.waitCh, run.logs, "would_deny_egress", "dst="+run.fixture.IP)
+	if got := waitForProbeResults(t, 5*time.Second, func() string {
+		return tcpExchangeResult(fixtureTCPEchoAddr(run.fixture.IP), 300*time.Millisecond)
+	}, "success"); got != "success" {
+		t.Fatalf("tcp direct result = %q, want success", got)
+	}
+	if got := waitForProbeResults(t, 5*time.Second, func() string {
+		return udpExchangeResult(fixtureUDPEchoAddr(run.fixture.IP), 300*time.Millisecond)
+	}, "success"); got != "success" {
+		t.Fatalf("udp direct result = %q, want success", got)
+	}
+	if got := waitForProbeResults(t, 5*time.Second, func() string {
+		return icmpProbeResult(run.fixture.IP, time.Second)
+	}, "success"); got != "success" {
+		t.Fatalf("icmp direct result = %q, want success", got)
+	}
+
+	waitForLogLine(t, run.waitCh, run.logs, "would_deny_egress", "dst="+run.fixture.IP, "proto=tcp", fmt.Sprintf("port=%d", fixtureTCPEchoPort))
+	waitForLogLine(t, run.waitCh, run.logs, "would_deny_egress", "dst="+run.fixture.IP, "proto=udp", fmt.Sprintf("port=%d", fixtureUDPEchoPort))
+	waitForLogLine(t, run.waitCh, run.logs, "would_deny_egress", "dst="+run.fixture.IP, "proto=icmp", "port=0")
 
 	resp := waitForAnswer(t, run.listenAddr, "blocked.vm.test.", run.waitCh, run.logs)
 	assertFixtureLearned(t, resp, run.fixture.IP)
 	waitForLog(t, "would_deny_dns", run.waitCh, run.logs)
 	waitForLog(t, "host=blocked.vm.test", run.waitCh, run.logs)
+	if got := waitForProbeResults(t, 5*time.Second, func() string {
+		return httpsProbeResult(net.JoinHostPort(run.fixture.IP, "443"), run.blockedHost, 750*time.Millisecond)
+	}, "error", "timeout"); got == "" {
+		t.Fatal("https 443 probe did not produce blocked outcome")
+	}
+	if got := waitForProbeResults(t, 5*time.Second, func() string {
+		return httpsProbeResult(net.JoinHostPort(run.fixture.IP, "8443"), run.blockedHost, 750*time.Millisecond)
+	}, "error", "timeout"); got == "" {
+		t.Fatal("https 8443 probe did not produce blocked outcome")
+	}
+	waitForLogLine(t, run.waitCh, run.logs, "would_deny_https", "host=blocked.vm.test", "port=443", "method=HEAD", "path=/healthz")
+	waitForLogLine(t, run.waitCh, run.logs, "would_deny_https", "host=blocked.vm.test", "port=8443", "method=HEAD", "path=/healthz")
+
+	for _, line := range findLogLinesContaining(run.logs.String(), "would_deny_dns") {
+		t.Logf("nie: %s", line)
+	}
+	for _, line := range findLogLinesContaining(run.logs.String(), "would_deny_egress") {
+		t.Logf("nie: %s", line)
+	}
+	for _, line := range findLogLinesContaining(run.logs.String(), "would_deny_https") {
+		t.Logf("nie: %s", line)
+	}
 
 	harness.stop(t, run)
 }
@@ -73,6 +142,12 @@ func TestVMLongLivedProcessRecoversAcrossNieRestart(t *testing.T) {
 		"kind=tcp", "phase=direct", "result=success",
 	)
 	cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
+		"kind=udp", "phase=direct", "result=success",
+	)
+	cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
+		"kind=icmp", "phase=direct", "result=success",
+	)
+	cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
 		"kind=dns", "phase=blocked-upstream", "result=success",
 	)
 
@@ -83,8 +158,24 @@ func TestVMLongLivedProcessRecoversAcrossNieRestart(t *testing.T) {
 			[]string{"kind=tcp", "phase=direct", "result=timeout"},
 			[]string{"kind=tcp", "phase=direct", "result=error"},
 		)
+		cursor = waitForProbeStateOneOf(t, probe.waitCh, probe.logs, cursor,
+			[]string{"kind=udp", "phase=direct", "result=timeout"},
+			[]string{"kind=udp", "phase=direct", "result=error"},
+		)
+		cursor = waitForProbeStateOneOf(t, probe.waitCh, probe.logs, cursor,
+			[]string{"kind=icmp", "phase=direct", "result=timeout"},
+			[]string{"kind=icmp", "phase=direct", "result=error"},
+		)
 		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
 			"kind=dns", "phase=blocked-proxy", "result=refused",
+		)
+		cursor = waitForProbeStateOneOf(t, probe.waitCh, probe.logs, cursor,
+			[]string{"kind=https", "phase=blocked-443", "result=timeout"},
+			[]string{"kind=https", "phase=blocked-443", "result=error"},
+		)
+		cursor = waitForProbeStateOneOf(t, probe.waitCh, probe.logs, cursor,
+			[]string{"kind=https", "phase=blocked-8443", "result=timeout"},
+			[]string{"kind=https", "phase=blocked-8443", "result=error"},
 		)
 		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
 			"kind=dns", "phase=allowed-proxy", "result=success",
@@ -92,11 +183,23 @@ func TestVMLongLivedProcessRecoversAcrossNieRestart(t *testing.T) {
 		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
 			"kind=tcp", "phase=learned", "result=success",
 		)
+		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
+			"kind=udp", "phase=learned", "result=success",
+		)
+		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
+			"kind=icmp", "phase=learned", "result=success",
+		)
 
 		harness.stop(t, run)
 
 		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
 			"kind=tcp", "phase=direct", "result=success",
+		)
+		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
+			"kind=udp", "phase=direct", "result=success",
+		)
+		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
+			"kind=icmp", "phase=direct", "result=success",
 		)
 		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
 			"kind=dns", "phase=blocked-upstream", "result=success",
@@ -131,6 +234,7 @@ type vmNieHarness struct {
 type vmRun struct {
 	fixture     vmFixture
 	allowedHost string
+	blockedHost string
 	listenAddr  string
 	logs        *lockedBuffer
 	waitCh      <-chan error
@@ -168,6 +272,7 @@ func newVMNieHarness(t *testing.T, scenario vmScenario) *vmNieHarness {
 	if len(scenario.allowHosts) == 0 {
 		scenario.allowHosts = []string{allowedHost}
 	}
+	cleanupStaleNieRedirectState(t)
 
 	root := repoRoot(t)
 	tmpDir := t.TempDir()
@@ -222,6 +327,7 @@ func (h *vmNieHarness) start(t *testing.T) *vmRun {
 	run := &vmRun{
 		fixture:     h.fixture,
 		allowedHost: h.allowedHost,
+		blockedHost: h.blockedHost,
 		listenAddr:  h.listenAddr,
 		logs:        &logs,
 		waitCh:      waitCh,
@@ -347,6 +453,7 @@ https:
   listen: %s
   ports:
     - 443
+    - 8443
 `, mode, iface, listenAddr, upstreamAddr, allowSection, httpsListenAddr)
 
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
@@ -510,7 +617,7 @@ func assertFixtureBlockedBeforeLearning(t *testing.T, fixtureAddr string, waitCh
 		default:
 		}
 
-		if err := dialFixture(fixtureAddr, 250*time.Millisecond); err != nil {
+		if result := tcpExchangeResult(fixtureAddr, 250*time.Millisecond); result == "error" || result == "timeout" {
 			consecutiveFailures++
 			if consecutiveFailures >= 5 {
 				return
@@ -547,7 +654,7 @@ func waitForFixtureReachable(t *testing.T, fixtureAddr string, waitCh <-chan err
 		default:
 		}
 
-		if err := dialFixture(fixtureAddr, time.Second); err == nil {
+		if result := tcpExchangeResult(fixtureAddr, time.Second); result == "success" {
 			return
 		}
 
@@ -555,14 +662,6 @@ func waitForFixtureReachable(t *testing.T, fixtureAddr string, waitCh <-chan err
 	}
 
 	t.Fatalf("timed out waiting for fixture %s to become reachable; logs=%s", fixtureAddr, logs.String())
-}
-
-func dialFixture(addr string, timeout time.Duration) error {
-	conn, err := net.DialTimeout("tcp", addr, timeout)
-	if err != nil {
-		return err
-	}
-	return conn.Close()
 }
 
 func gracefulStopVMNie(cmd *exec.Cmd, procDone <-chan struct{}) {

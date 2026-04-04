@@ -344,6 +344,8 @@ func logAuditEgressEvents(ctx context.Context, logger *slog.Logger, reader ebpf.
 		logger.Info("would_deny_egress",
 			"dst", event.Destination.String(),
 			"reason", event.Reason.String(),
+			"proto", event.Protocol.String(),
+			"port", event.Port,
 		)
 	}
 }

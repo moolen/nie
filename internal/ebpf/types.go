@@ -46,6 +46,32 @@ type EgressEvent struct {
 	Destination netip.Addr
 	Reason      EgressReason
 	Action      EgressAction
+	Protocol    EgressProtocol
+	Port        uint16
+}
+
+type EgressProtocol uint8
+
+const (
+	EgressProtocolUnknown EgressProtocol = 0
+	EgressProtocolICMP    EgressProtocol = 1
+	EgressProtocolTCP     EgressProtocol = 6
+	EgressProtocolUDP     EgressProtocol = 17
+)
+
+func (p EgressProtocol) String() string {
+	switch p {
+	case EgressProtocolICMP:
+		return "icmp"
+	case EgressProtocolTCP:
+		return "tcp"
+	case EgressProtocolUDP:
+		return "udp"
+	case EgressProtocolUnknown:
+		return "unknown"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint8(p))
+	}
 }
 
 type EventReader interface {

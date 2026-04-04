@@ -433,13 +433,15 @@ func (r *liveEventReader) Close() error {
 }
 
 func decodeEgressEvent(raw []byte) (EgressEvent, error) {
-	if len(raw) < 12 {
+	if len(raw) < 16 {
 		return EgressEvent{}, fmt.Errorf("short egress event record: %d", len(raw))
 	}
 
 	dst := binary.NativeEndian.Uint32(raw[0:4])
 	reason := binary.NativeEndian.Uint32(raw[4:8])
 	action := binary.NativeEndian.Uint32(raw[8:12])
+	protocol := raw[12]
+	dport := binary.NativeEndian.Uint16(raw[14:16])
 
 	return EgressEvent{
 		Destination: netip.AddrFrom4([4]byte{
@@ -450,6 +452,8 @@ func decodeEgressEvent(raw []byte) (EgressEvent, error) {
 		}),
 		Reason: EgressReason(reason),
 		Action: EgressAction(action),
+		Protocol: EgressProtocol(protocol),
+		Port:     dport,
 	}, nil
 }
 

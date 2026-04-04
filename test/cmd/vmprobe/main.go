@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -30,6 +33,19 @@ type probeConfig struct {
 	blockedHost string
 	interval    time.Duration
 	timeout     time.Duration
+}
+
+const probePayload = "nie-probe"
+
+const (
+	fixtureTCPEchoPort = 18081
+	fixtureUDPEchoPort = 18082
+)
+
+var runICMPCommand = func(ctx context.Context, target string, timeout time.Duration) error {
+	waitSeconds := max(1, int(timeout/time.Second))
+	cmd := exec.CommandContext(ctx, "ping", "-n", "-c", "1", "-W", fmt.Sprintf("%d", waitSeconds), target)
+	return cmd.Run()
 }
 
 func formatProbeResult(r probeResult) string {
@@ -83,11 +99,24 @@ func parseConfig() probeConfig {
 }
 
 func runProbeCycle(cfg probeConfig, w io.Writer) {
+	fixtureIP := fixtureIP(cfg.fixture)
 	emitResult(w, probeResult{
 		Kind:   "tcp",
 		Phase:  "direct",
-		Target: cfg.fixture,
-		Result: tcpProbe(cfg.fixture, cfg.timeout),
+		Target: fixtureTCPEchoAddr(fixtureIP),
+		Result: tcpExchangeProbe(fixtureTCPEchoAddr(fixtureIP), cfg.timeout),
+	})
+	emitResult(w, probeResult{
+		Kind:   "udp",
+		Phase:  "direct",
+		Target: fixtureUDPEchoAddr(fixtureIP),
+		Result: udpExchangeProbe(fixtureUDPEchoAddr(fixtureIP), cfg.timeout),
+	})
+	emitResult(w, probeResult{
+		Kind:   "icmp",
+		Phase:  "direct",
+		Target: fixtureIP,
+		Result: icmpProbe(fixtureIP, cfg.timeout),
 	})
 	emitResult(w, probeResult{
 		Kind:   "dns",
@@ -110,8 +139,32 @@ func runProbeCycle(cfg probeConfig, w io.Writer) {
 	emitResult(w, probeResult{
 		Kind:   "tcp",
 		Phase:  "learned",
-		Target: cfg.fixture,
-		Result: tcpProbe(cfg.fixture, cfg.timeout),
+		Target: fixtureTCPEchoAddr(fixtureIP),
+		Result: tcpExchangeProbe(fixtureTCPEchoAddr(fixtureIP), cfg.timeout),
+	})
+	emitResult(w, probeResult{
+		Kind:   "udp",
+		Phase:  "learned",
+		Target: fixtureUDPEchoAddr(fixtureIP),
+		Result: udpExchangeProbe(fixtureUDPEchoAddr(fixtureIP), cfg.timeout),
+	})
+	emitResult(w, probeResult{
+		Kind:   "icmp",
+		Phase:  "learned",
+		Target: fixtureIP,
+		Result: icmpProbe(fixtureIP, cfg.timeout),
+	})
+	emitResult(w, probeResult{
+		Kind:   "https",
+		Phase:  "blocked-443",
+		Target: net.JoinHostPort(cfg.blockedHost, "443"),
+		Result: httpsProbe(net.JoinHostPort(fixtureIP, "443"), cfg.blockedHost, cfg.timeout),
+	})
+	emitResult(w, probeResult{
+		Kind:   "https",
+		Phase:  "blocked-8443",
+		Target: net.JoinHostPort(cfg.blockedHost, "8443"),
+		Result: httpsProbe(net.JoinHostPort(fixtureIP, "8443"), cfg.blockedHost, cfg.timeout),
 	})
 }
 
@@ -124,6 +177,97 @@ func tcpProbe(target string, timeout time.Duration) string {
 		return classifyNetError(err)
 	}
 	_ = conn.Close()
+	return "success"
+}
+
+func tcpExchangeProbe(target string, timeout time.Duration) string {
+	if target == "" {
+		return "error"
+	}
+	conn, err := net.DialTimeout("tcp", target, timeout)
+	if err != nil {
+		return classifyNetError(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	if _, err := io.WriteString(conn, probePayload); err != nil {
+		return classifyNetError(err)
+	}
+	buf := make([]byte, len(probePayload))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		return classifyNetError(err)
+	}
+	if string(buf) != probePayload {
+		return "error"
+	}
+	return "success"
+}
+
+func udpExchangeProbe(target string, timeout time.Duration) string {
+	if target == "" {
+		return "error"
+	}
+	conn, err := net.DialTimeout("udp", target, timeout)
+	if err != nil {
+		return classifyNetError(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	if _, err := io.WriteString(conn, probePayload); err != nil {
+		return classifyNetError(err)
+	}
+	buf := make([]byte, len(probePayload))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		return classifyNetError(err)
+	}
+	if string(buf) != probePayload {
+		return "error"
+	}
+	return "success"
+}
+
+func httpsProbe(targetAddr, serverName string, timeout time.Duration) string {
+	if targetAddr == "" || serverName == "" {
+		return "error"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, targetAddr)
+		},
+		TLSClientConfig: &tls.Config{
+			ServerName:         serverName,
+			InsecureSkipVerify: true,
+		},
+	}
+	defer transport.CloseIdleConnections()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, "https://"+serverName+"/healthz", nil)
+	if err != nil {
+		return "error"
+	}
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		return classifyNetError(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return "error"
+	}
+	return "success"
+}
+
+func icmpProbe(target string, timeout time.Duration) string {
+	if target == "" {
+		return "error"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Second)
+	defer cancel()
+	if err := runICMPCommand(ctx, target, timeout); err != nil {
+		return classifyNetError(err)
+	}
 	return "success"
 }
 
@@ -155,6 +299,28 @@ func classifyNetError(err error) string {
 		return "timeout"
 	}
 	return "error"
+}
+
+func fixtureIP(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	return host
+}
+
+func fixtureTCPEchoAddr(ip string) string {
+	if ip == "" {
+		return ""
+	}
+	return net.JoinHostPort(ip, fmt.Sprintf("%d", fixtureTCPEchoPort))
+}
+
+func fixtureUDPEchoAddr(ip string) string {
+	if ip == "" {
+		return ""
+	}
+	return net.JoinHostPort(ip, fmt.Sprintf("%d", fixtureUDPEchoPort))
 }
 
 func normalizeAddr(addr, defaultPort string) string {

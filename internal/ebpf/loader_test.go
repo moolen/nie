@@ -318,10 +318,12 @@ func TestManagerEventReaderAfterStartUsesReaderFactory(t *testing.T) {
 }
 
 func TestDecodeEgressEvent(t *testing.T) {
-	raw := make([]byte, 12)
+	raw := make([]byte, 16)
 	binary.NativeEndian.PutUint32(raw[0:4], 0xcb00710a)
 	binary.NativeEndian.PutUint32(raw[4:8], uint32(EgressReasonNotAllowed))
 	binary.NativeEndian.PutUint32(raw[8:12], uint32(EgressActionAllow))
+	raw[12] = uint8(EgressProtocolTCP)
+	binary.NativeEndian.PutUint16(raw[14:16], 443)
 
 	event, err := decodeEgressEvent(raw)
 	if err != nil {
@@ -335,6 +337,12 @@ func TestDecodeEgressEvent(t *testing.T) {
 	}
 	if event.Action != EgressActionAllow {
 		t.Fatalf("Action = %v, want %v", event.Action, EgressActionAllow)
+	}
+	if event.Protocol != EgressProtocolTCP {
+		t.Fatalf("Protocol = %v, want %v", event.Protocol, EgressProtocolTCP)
+	}
+	if event.Port != 443 {
+		t.Fatalf("Port = %d, want %d", event.Port, 443)
 	}
 }
 

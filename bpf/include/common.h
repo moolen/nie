@@ -23,6 +23,9 @@ struct event {
 	__u32 dst_ipv4;
 	__u32 reason;
 	__u32 action;
+	__u8 protocol;
+	__u8 pad0;
+	__u16 dport;
 };
 
 #endif /* NIE_BPF_COMMON_H */

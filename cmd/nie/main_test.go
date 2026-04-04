@@ -238,6 +238,8 @@ func TestStartAuditEgressLoggerLogsAllowEvents(t *testing.T) {
 				Destination: netip.MustParseAddr("203.0.113.10"),
 				Reason:      ebpf.EgressReasonNotAllowed,
 				Action:      ebpf.EgressActionAllow,
+				Protocol:    ebpf.EgressProtocolTCP,
+				Port:        443,
 			}},
 			{event: ebpf.EgressEvent{
 				Destination: netip.MustParseAddr("203.0.113.11"),
@@ -267,6 +269,12 @@ func TestStartAuditEgressLoggerLogsAllowEvents(t *testing.T) {
 	}
 	if !strings.Contains(output, "reason=not_allowed") {
 		t.Fatalf("log output = %q, want reason=not_allowed", output)
+	}
+	if !strings.Contains(output, "proto=tcp") {
+		t.Fatalf("log output = %q, want proto=tcp", output)
+	}
+	if !strings.Contains(output, "port=443") {
+		t.Fatalf("log output = %q, want port=443", output)
 	}
 	if strings.Contains(output, "203.0.113.11") {
 		t.Fatalf("log output = %q, want dropped event to be ignored", output)

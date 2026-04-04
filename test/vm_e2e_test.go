@@ -433,10 +433,8 @@ func waitForVMNieExit(cmd *exec.Cmd, waitCh <-chan error, procDone <-chan struct
 	case <-time.After(interruptTimeout):
 	}
 
-	select {
-	case <-procDone:
-		return false, nil
-	default:
+	if err, ok := readVMNieWaitResult(waitCh, procDone); ok {
+		return false, err
 	}
 
 	if cmd != nil && cmd.Process != nil {
@@ -453,6 +451,10 @@ func waitForVMNieKill(waitCh <-chan error, procDone <-chan struct{}, killTimeout
 	case <-time.After(killTimeout):
 	}
 
+	if err, ok := readVMNieWaitResult(waitCh, procDone); ok {
+		return err
+	}
+
 	select {
 	case <-procDone:
 		return nil
@@ -460,6 +462,38 @@ func waitForVMNieKill(waitCh <-chan error, procDone <-chan struct{}, killTimeout
 	}
 
 	return fmt.Errorf("timed out waiting for nie to exit after kill")
+}
+
+func readVMNieWaitResult(waitCh <-chan error, procDone <-chan struct{}) (error, bool) {
+	select {
+	case err := <-waitCh:
+		return err, true
+	case <-procDone:
+		select {
+		case err := <-waitCh:
+			return err, true
+		case <-time.After(50 * time.Millisecond):
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
+}
+
+func TestReadVMNieWaitResultPreservesWaitErrorAfterProcDone(t *testing.T) {
+	waitCh := make(chan error, 1)
+	procDone := make(chan struct{})
+
+	waitCh <- fmt.Errorf("boom")
+	close(procDone)
+
+	err, ok := readVMNieWaitResult(waitCh, procDone)
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("err = %v, want boom", err)
+	}
 }
 
 func waitForVMPinnedStateAfterExit(t *testing.T, path string, wantExists bool) {

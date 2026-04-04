@@ -18,7 +18,8 @@ import (
 )
 
 func TestVMEnforceBlocksThenAllowsRealEgress(t *testing.T) {
-	run := startVMNieScenario(t, vmScenario{mode: "enforce"})
+	harness := newVMNieHarness(t, vmScenario{mode: "enforce"})
+	run := harness.start(t)
 
 	assertFixtureBlockedBeforeLearning(t, run.fixture.Address, run.waitCh, run.logs)
 
@@ -27,26 +28,28 @@ func TestVMEnforceBlocksThenAllowsRealEgress(t *testing.T) {
 
 	waitForFixtureReachable(t, run.fixture.Address, run.waitCh, run.logs)
 
-	run.stopAndWait(t)
+	harness.stop(t, run)
 }
 
 func TestVMEnforceDeniedHostnameReturnsRefused(t *testing.T) {
-	run := startVMNieScenario(t, vmScenario{
+	harness := newVMNieHarness(t, vmScenario{
 		mode: "enforce",
 	})
+	run := harness.start(t)
 
 	resp := waitForAnswer(t, run.listenAddr, "blocked.vm.test.", run.waitCh, run.logs)
 	if resp.Rcode != dns.RcodeRefused {
 		t.Fatalf("rcode = %d, want %d", resp.Rcode, dns.RcodeRefused)
 	}
 
-	run.stopAndWait(t)
+	harness.stop(t, run)
 }
 
 func TestVMAuditLogsWouldDenyDNSAndEgress(t *testing.T) {
-	run := startVMNieScenario(t, vmScenario{
+	harness := newVMNieHarness(t, vmScenario{
 		mode: "audit",
 	})
+	run := harness.start(t)
 
 	waitForFixtureReachable(t, run.fixture.Address, run.waitCh, run.logs)
 	waitForLogLine(t, run.waitCh, run.logs, "would_deny_egress", "dst="+run.fixture.IP)
@@ -56,7 +59,15 @@ func TestVMAuditLogsWouldDenyDNSAndEgress(t *testing.T) {
 	waitForLog(t, "would_deny_dns", run.waitCh, run.logs)
 	waitForLog(t, "host=blocked.vm.test", run.waitCh, run.logs)
 
-	run.stopAndWait(t)
+	harness.stop(t, run)
+}
+
+func TestVMLongLivedProcessRecoversAcrossNieRestart(t *testing.T) {
+	if os.Getenv("NIE_VM_E2E") != "1" {
+		t.Skip("vm e2e disabled")
+	}
+
+	t.Fatal("not implemented")
 }
 
 type vmFixture struct {
@@ -70,6 +81,15 @@ type vmScenario struct {
 	allowHosts []string
 }
 
+type vmNieHarness struct {
+	root        string
+	binPath     string
+	configPath  string
+	listenAddr  string
+	fixture     vmFixture
+	allowedHost string
+}
+
 type vmRun struct {
 	fixture     vmFixture
 	allowedHost string
@@ -78,9 +98,10 @@ type vmRun struct {
 	waitCh      <-chan error
 	procDone    <-chan struct{}
 	cmd         *exec.Cmd
+	stopped     bool
 }
 
-func startVMNieScenario(t *testing.T, scenario vmScenario) *vmRun {
+func newVMNieHarness(t *testing.T, scenario vmScenario) *vmNieHarness {
 	t.Helper()
 
 	if os.Getenv("NIE_VM_E2E") != "1" {
@@ -114,11 +135,24 @@ func startVMNieScenario(t *testing.T, scenario vmScenario) *vmRun {
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	writeVMConfig(t, configPath, scenario.mode, iface, listenAddr, upstreamAddr, scenario.allowHosts)
 
+	return &vmNieHarness{
+		root:        root,
+		binPath:     binPath,
+		configPath:  configPath,
+		listenAddr:  listenAddr,
+		fixture:     fixture,
+		allowedHost: allowedHost,
+	}
+}
+
+func (h *vmNieHarness) start(t *testing.T) *vmRun {
+	t.Helper()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 
-	cmd := exec.CommandContext(ctx, binPath, "-config", configPath)
-	cmd.Dir = root
+	cmd := exec.CommandContext(ctx, h.binPath, "-config", h.configPath)
+	cmd.Dir = h.root
 
 	var logs lockedBuffer
 	cmd.Stdout = &logs
@@ -135,32 +169,44 @@ func startVMNieScenario(t *testing.T, scenario vmScenario) *vmRun {
 		close(procDone)
 	}()
 
-	t.Cleanup(func() {
-		gracefulStopVMNie(cmd, procDone)
-	})
-
-	waitForPinnedState(t, "/sys/fs/bpf/nie", true, waitCh, &logs)
-	waitForNieRedirectState(t, true, waitCh, &logs)
-
-	return &vmRun{
-		fixture:     fixture,
-		allowedHost: allowedHost,
-		listenAddr:  listenAddr,
+	run := &vmRun{
+		fixture:     h.fixture,
+		allowedHost: h.allowedHost,
+		listenAddr:  h.listenAddr,
 		logs:        &logs,
 		waitCh:      waitCh,
 		procDone:    procDone,
 		cmd:         cmd,
 	}
+
+	t.Cleanup(func() {
+		if !run.stopped {
+			gracefulStopVMNie(cmd, procDone)
+		}
+	})
+
+	waitForPinnedState(t, "/sys/fs/bpf/nie", true, waitCh, &logs)
+	waitForNieRedirectState(t, true, waitCh, &logs)
+
+	return run
 }
 
-func (r *vmRun) stopAndWait(t *testing.T) {
+func (h *vmNieHarness) stop(t *testing.T, run *vmRun) {
 	t.Helper()
 
-	if err := r.cmd.Process.Signal(os.Interrupt); err != nil {
+	if run == nil || run.cmd == nil || run.cmd.Process == nil {
+		t.Fatal("nie process is not running")
+	}
+	if run.stopped {
+		return
+	}
+	run.stopped = true
+
+	if err := run.cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatalf("signal nie: %v", err)
 	}
-	if err := <-r.waitCh; err != nil {
-		t.Fatalf("wait for nie exit: %v; logs=%s", err, r.logs.String())
+	if err := <-run.waitCh; err != nil {
+		t.Fatalf("wait for nie exit: %v; logs=%s", err, run.logs.String())
 	}
 
 	waitForVMPinnedStateAfterExit(t, "/sys/fs/bpf/nie", false)

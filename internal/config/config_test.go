@@ -28,6 +28,40 @@ policy:
 	}
 }
 
+func TestLoadConfig_HTTPSDefaults(t *testing.T) {
+	raw := []byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+  mitm:
+    rules:
+      - host: api.github.com
+        port: 443
+        methods: ["GET"]
+        paths: ["/repos/**"]
+        action: allow
+`)
+
+	cfg, err := Load(raw)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.HTTPS.Listen != "127.0.0.1:9443" {
+		t.Fatalf("HTTPS.Listen = %q, want default 127.0.0.1:9443", cfg.HTTPS.Listen)
+	}
+	if cfg.HTTPS.SNI.Missing != "deny" {
+		t.Fatalf("HTTPS.SNI.Missing = %q, want deny", cfg.HTTPS.SNI.Missing)
+	}
+}
+
 func TestLoadConfig_RejectsMissingInterface(t *testing.T) {
 	_, err := Load([]byte(`mode: enforce`))
 	if err == nil {

@@ -11,6 +11,7 @@ TMPDIR_ROOT="${TMPDIR:-/tmp}"
 tmpdir="$(mktemp -d "${TMPDIR_ROOT}/nie-vm-tests.XXXXXX")"
 fixture_bin="${tmpdir}/fixture"
 fixture_log="${tmpdir}/fixture.log"
+fixture_ready="${tmpdir}/fixture.ready"
 
 cleanup() {
   if [[ -n "${fixture_pid:-}" ]]; then
@@ -42,43 +43,24 @@ derive_fixture_addr() {
   FIXTURE_ADDR="${host_ip}:${FIXTURE_PORT}"
 }
 
-probe_fixture() {
-  local fixture_host fixture_port status_line
-
-  fixture_host="${FIXTURE_ADDR%:*}"
-  fixture_port="${FIXTURE_ADDR##*:}"
-
-  exec 3<>"/dev/tcp/${fixture_host}/${fixture_port}" || return 1
-  printf 'GET /healthz HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "${fixture_host}" >&3
-  IFS= read -r -t 1 status_line <&3 || {
-    exec 3<&-
-    exec 3>&-
-    return 1
-  }
-  exec 3<&-
-  exec 3>&-
-
-  [[ "${status_line}" == *" 200 "* ]]
-}
-
 wait_for_fixture() {
   local attempt
 
   for attempt in {1..50}; do
+    if [[ -f "${fixture_ready}" ]]; then
+      return 0
+    fi
+
     if ! kill -0 "${fixture_pid}" >/dev/null 2>&1; then
       echo "fixture exited before readiness; log: ${fixture_log}" >&2
       cat "${fixture_log}" >&2 || true
       return 1
     fi
 
-    if probe_fixture >/dev/null 2>&1; then
-      return 0
-    fi
-
     sleep 0.2
   done
 
-  echo "fixture did not become ready at ${FIXTURE_ADDR}; log: ${fixture_log}" >&2
+  echo "fixture did not report ready at ${fixture_ready}; log: ${fixture_log}" >&2
   cat "${fixture_log}" >&2 || true
   return 1
 }
@@ -96,7 +78,7 @@ cd "${ROOT}"
 derive_fixture_addr
 
 go build -o "${fixture_bin}" ./vm/vagrant/fixture
-"${fixture_bin}" -listen "${FIXTURE_ADDR}" >"${fixture_log}" 2>&1 &
+"${fixture_bin}" -listen "${FIXTURE_ADDR}" -ready-file "${fixture_ready}" >"${fixture_log}" 2>&1 &
 fixture_pid=$!
 wait_for_fixture
 

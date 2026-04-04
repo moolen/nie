@@ -2,10 +2,12 @@ package ebpf
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -311,6 +313,37 @@ func TestManagerEventReaderAfterStartUsesReaderFactory(t *testing.T) {
 	}
 	if reader != fakeReader {
 		t.Fatalf("EventReader() reader = %#v, want %#v", reader, fakeReader)
+	}
+}
+
+func TestDecodeEgressEvent(t *testing.T) {
+	raw := make([]byte, 12)
+	binary.NativeEndian.PutUint32(raw[0:4], 0xcb00710a)
+	binary.NativeEndian.PutUint32(raw[4:8], uint32(EgressReasonNotAllowed))
+	binary.NativeEndian.PutUint32(raw[8:12], uint32(EgressActionAllow))
+
+	event, err := decodeEgressEvent(raw)
+	if err != nil {
+		t.Fatalf("decodeEgressEvent() error = %v", err)
+	}
+	if event.Destination != netip.MustParseAddr("203.0.113.10") {
+		t.Fatalf("Destination = %s, want %s", event.Destination, "203.0.113.10")
+	}
+	if event.Reason != EgressReasonNotAllowed {
+		t.Fatalf("Reason = %v, want %v", event.Reason, EgressReasonNotAllowed)
+	}
+	if event.Action != EgressActionAllow {
+		t.Fatalf("Action = %v, want %v", event.Action, EgressActionAllow)
+	}
+}
+
+func TestDecodeEgressEventRejectsShortRecord(t *testing.T) {
+	_, err := decodeEgressEvent([]byte{1, 2, 3})
+	if err == nil {
+		t.Fatal("decodeEgressEvent() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "short egress event record") {
+		t.Fatalf("decodeEgressEvent() error = %q, want short-record error", err)
 	}
 }
 

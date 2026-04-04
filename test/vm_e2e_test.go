@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,7 +49,7 @@ func TestVMAuditLogsWouldDenyDNSAndEgress(t *testing.T) {
 	})
 
 	waitForFixtureReachable(t, run.fixture.Address, run.waitCh, run.logs)
-	waitForLog(t, "would_deny_egress", run.waitCh, run.logs)
+	waitForLogLine(t, run.waitCh, run.logs, "would_deny_egress", "dst="+run.fixture.IP)
 
 	resp := waitForAnswer(t, run.listenAddr, "blocked.vm.test.", run.waitCh, run.logs)
 	assertFixtureLearned(t, resp, run.fixture.IP)
@@ -231,7 +232,7 @@ func writeVMConfig(t *testing.T, path, mode, iface, listenAddr, upstreamAddr str
 		allowSection += fmt.Sprintf("    - %s\n", host)
 	}
 
-	raw := fmt.Sprintf(`mode: enforce
+	raw := fmt.Sprintf(`mode: %s
 interface: %s
 dns:
   listen: %s
@@ -241,12 +242,43 @@ dns:
 policy:
   default: deny
   allow:
-%s`, iface, listenAddr, upstreamAddr, allowSection)
-	raw = "mode: " + mode + "\n" + raw[len("mode: enforce\n"):]
+%s`, mode, iface, listenAddr, upstreamAddr, allowSection)
 
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatalf("write vm config: %v", err)
 	}
+}
+
+func waitForLogLine(t *testing.T, waitCh <-chan error, logs *lockedBuffer, needles ...string) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range strings.Split(logs.String(), "\n") {
+			if logLineContainsAll(line, needles...) {
+				return
+			}
+		}
+
+		select {
+		case err := <-waitCh:
+			t.Fatalf("nie exited before log line %q: %v; logs=%s", strings.Join(needles, " "), err, logs.String())
+		default:
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for log line %q; logs=%s", strings.Join(needles, " "), logs.String())
+}
+
+func logLineContainsAll(line string, needles ...string) bool {
+	for _, needle := range needles {
+		if !strings.Contains(line, needle) {
+			return false
+		}
+	}
+	return true
 }
 
 func assertFixtureBlockedBeforeLearning(t *testing.T, fixtureAddr string, waitCh <-chan error, logs *lockedBuffer) {

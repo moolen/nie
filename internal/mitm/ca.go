@@ -1,6 +1,7 @@
 package mitm
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -81,6 +82,9 @@ func loadAuthority(paths CAPaths) (*Authority, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse key file %q: %w", paths.KeyFile, err)
 	}
+	if err := validateLoadedAuthority(cert, key); err != nil {
+		return nil, err
+	}
 
 	return &Authority{Cert: cert, Key: key}, nil
 }
@@ -97,14 +101,81 @@ func generateAndPersistAuthority(paths CAPaths) (*Authority, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(paths.CertFile, certPEM, 0o600); err != nil {
-		return nil, fmt.Errorf("write cert file %q: %w", paths.CertFile, err)
-	}
-	if err := os.WriteFile(paths.KeyFile, keyPEM, 0o600); err != nil {
-		return nil, fmt.Errorf("write key file %q: %w", paths.KeyFile, err)
+	if err := persistCAFiles(paths, certPEM, keyPEM); err != nil {
+		return nil, err
 	}
 
 	return &Authority{Cert: cert, Key: key}, nil
+}
+
+func validateLoadedAuthority(cert *x509.Certificate, key crypto.Signer) error {
+	if !cert.IsCA {
+		return errors.New("loaded certificate is not a certificate authority")
+	}
+	if cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return errors.New("loaded certificate key usage does not allow certificate signing")
+	}
+	certPublicDER, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
+	if err != nil {
+		return fmt.Errorf("marshal certificate public key: %w", err)
+	}
+	keyPublicDER, err := x509.MarshalPKIXPublicKey(key.Public())
+	if err != nil {
+		return fmt.Errorf("marshal private key public component: %w", err)
+	}
+	if !bytes.Equal(certPublicDER, keyPublicDER) {
+		return errors.New("loaded private key does not match certificate public key")
+	}
+	return nil
+}
+
+func persistCAFiles(paths CAPaths, certPEM, keyPEM []byte) error {
+	if err := writeFileAtomically(paths.CertFile, certPEM, 0o600); err != nil {
+		return fmt.Errorf("write cert file %q: %w", paths.CertFile, err)
+	}
+	if err := writeFileAtomically(paths.KeyFile, keyPEM, 0o600); err != nil {
+		// Self-healing: never leave a half-written CA pair on disk.
+		_ = os.Remove(paths.CertFile)
+		_ = os.Remove(paths.KeyFile)
+		return fmt.Errorf("write key file %q: %w", paths.KeyFile, err)
+	}
+	return nil
+}
+
+func writeFileAtomically(path string, data []byte, perm os.FileMode) (retErr error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".nie-ca-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		if retErr != nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(perm); err != nil {
+		retErr = err
+		return retErr
+	}
+	if _, err := tmp.Write(data); err != nil {
+		retErr = err
+		return retErr
+	}
+	if err := tmp.Sync(); err != nil {
+		retErr = err
+		return retErr
+	}
+	if err := tmp.Close(); err != nil {
+		retErr = err
+		return retErr
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		retErr = err
+		return retErr
+	}
+	return nil
 }
 
 func newSelfSignedCA(nowFn func() time.Time) (*ecdsa.PrivateKey, *x509.Certificate, []byte, []byte, error) {

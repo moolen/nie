@@ -64,12 +64,29 @@ func (c *LeafCache) CertificateForHost(host string) (*tls.Certificate, error) {
 }
 
 func (c *LeafCache) issueLeafCertificate(host string) (*tls.Certificate, error) {
+	now := c.now().UTC()
+	if now.After(c.authority.Cert.NotAfter) {
+		return nil, fmt.Errorf(
+			"certificate authority certificate is expired at %s",
+			c.authority.Cert.NotAfter.UTC().Format(time.RFC3339),
+		)
+	}
+
+	notBefore := now.Add(-5 * time.Minute)
+	notAfter := minTime(now.Add(90*24*time.Hour), c.authority.Cert.NotAfter)
+	if !notAfter.After(notBefore) {
+		return nil, fmt.Errorf(
+			"leaf validity window is invalid: not_before=%s not_after=%s",
+			notBefore.Format(time.RFC3339),
+			notAfter.Format(time.RFC3339),
+		)
+	}
+
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate leaf key for %q: %w", host, err)
 	}
 
-	now := c.now().UTC()
 	serial, err := randomSerial()
 	if err != nil {
 		return nil, fmt.Errorf("generate leaf serial number for %q: %w", host, err)
@@ -80,8 +97,8 @@ func (c *LeafCache) issueLeafCertificate(host string) (*tls.Certificate, error) 
 		Subject: pkix.Name{
 			CommonName: host,
 		},
-		NotBefore: now.Add(-5 * time.Minute),
-		NotAfter:  minTime(now.Add(90*24*time.Hour), c.authority.Cert.NotAfter),
+		NotBefore: notBefore,
+		NotAfter:  notAfter,
 		DNSNames:  []string{host},
 		ExtKeyUsage: []x509.ExtKeyUsage{
 			x509.ExtKeyUsageServerAuth,

@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"math/big"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -45,7 +46,49 @@ func TestLeafCache_IssuesCertificateForSNI(t *testing.T) {
 	}
 }
 
+func TestLeafCache_FailsForExpiredOrUnusableCA(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.April, 4, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		caNotBefore time.Time
+		caNotAfter  time.Time
+		wantError   string
+	}{
+		{
+			name:        "expired ca",
+			caNotBefore: now.Add(-48 * time.Hour),
+			caNotAfter:  now.Add(-time.Hour),
+			wantError:   "certificate authority certificate is expired",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			authority := testAuthorityWithValidity(t, tt.caNotBefore, tt.caNotAfter)
+			cache := NewLeafCache(authority, func() time.Time {
+				return now
+			})
+
+			_, err := cache.CertificateForHost("api.github.com")
+			if err == nil {
+				t.Fatal("CertificateForHost() error = nil, want non-nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("CertificateForHost() error = %q, want substring %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func testAuthority(t *testing.T) *Authority {
+	t.Helper()
+	now := time.Date(2026, time.April, 4, 12, 0, 0, 0, time.UTC)
+	return testAuthorityWithValidity(t, now.Add(-time.Hour), now.Add(10*365*24*time.Hour))
+}
+
+func testAuthorityWithValidity(t *testing.T, notBefore, notAfter time.Time) *Authority {
 	t.Helper()
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -53,14 +96,13 @@ func testAuthority(t *testing.T) *Authority {
 		t.Fatalf("GenerateKey() error = %v", err)
 	}
 
-	now := time.Date(2026, time.April, 4, 12, 0, 0, 0, time.UTC)
 	tpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
 		Subject: pkix.Name{
 			CommonName: "nie leaf issuer test root",
 		},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.Add(10 * 365 * 24 * time.Hour),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,

@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func NewEntry(rawIP string, ttl uint32, now time.Time, maxTTL time.Duration) (TrustEntry, error) {
+func NewEntry(rawIP string, port uint16, ttl uint32, now time.Time, maxTTL time.Duration) (TrustEntry, error) {
 	ip, err := netip.ParseAddr(rawIP)
 	if err != nil || !ip.Is4() {
 		return TrustEntry{}, fmt.Errorf("invalid IPv4: %q", rawIP)
@@ -19,6 +19,7 @@ func NewEntry(rawIP string, ttl uint32, now time.Time, maxTTL time.Duration) (Tr
 
 	return TrustEntry{
 		IPv4:      ip,
+		Port:      port,
 		ExpiresAt: now.Add(d),
 	}, nil
 }

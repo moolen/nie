@@ -11,6 +11,8 @@
 
 struct allow_key {
 	__u8 addr[4];
+	__u16 dport;
+	__u16 pad;
 };
 
 struct allow_value {

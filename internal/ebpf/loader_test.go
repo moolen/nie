@@ -57,7 +57,7 @@ func TestAllowStoresIPv4Key(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Allow() error = %v", err)
 	}
-	wantKey := allowKey{203, 0, 113, 10}
+	wantKey := allowKey{Addr: [4]byte{203, 0, 113, 10}, Dport: 0}
 	if _, ok := fake.entries[wantKey]; !ok {
 		t.Fatal("IPv4 key not written to fake map")
 	}
@@ -101,7 +101,7 @@ func TestAllowAcceptsExpiryEqualNow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Allow() error = %v", err)
 	}
-	wantKey := allowKey{203, 0, 113, 10}
+	wantKey := allowKey{Addr: [4]byte{203, 0, 113, 10}, Dport: 0}
 	if got, ok := fake.entries[wantKey]; !ok {
 		t.Fatal("IPv4 key not written to fake map")
 	} else if got.ExpiresAtMonoNs != 4242 {
@@ -113,11 +113,12 @@ func TestMapValueEncodingIncludesExpiryMonotonicNanoseconds(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	entry := TrustEntry{
 		IPv4:      netip.MustParseAddr("203.0.113.10"),
+		Port:      443,
 		ExpiresAt: time.Unix(1700000600, 0),
 	}
 
 	key, value := encodeEntry(entry, now, 1000)
-	if key != [4]byte{203, 0, 113, 10} {
+	if key != (allowKey{Addr: [4]byte{203, 0, 113, 10}, Dport: 443}) {
 		t.Fatalf("key = %v", key)
 	}
 	if value.ExpiresAtMonoNs != 1000+600*1_000_000_000 {
@@ -237,7 +238,7 @@ func TestManagerTrustWriterFailsBeforeStart(t *testing.T) {
 		t.Fatalf("Allow() error = %v", err)
 	}
 
-	wantKey := allowKey{203, 0, 113, 10}
+	wantKey := allowKey{Addr: [4]byte{203, 0, 113, 10}, Dport: 0}
 	if _, ok := allowMap.entries[wantKey]; !ok {
 		t.Fatal("TrustWriter() did not write through to allow map")
 	}

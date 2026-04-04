@@ -1,7 +1,10 @@
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
+#include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/pkt_cls.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
 
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
@@ -26,7 +29,7 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } events SEC(".maps");
 
-static __always_inline int parse_ipv4(struct __sk_buff *skb, struct iphdr **out_ip)
+static __always_inline int parse_ipv4_dport(struct __sk_buff *skb, struct iphdr **out_ip, __u16 *out_dport)
 {
 	void *data = (void *)(long)skb->data;
 	void *data_end = (void *)(long)skb->data_end;
@@ -46,6 +49,19 @@ static __always_inline int parse_ipv4(struct __sk_buff *skb, struct iphdr **out_
 		return -1;
 	if ((void *)ip + (ip->ihl * 4) > data_end)
 		return -1;
+
+	*out_dport = 0;
+	if (ip->protocol == IPPROTO_TCP) {
+		struct tcphdr *tcp = (void *)ip + (ip->ihl * 4);
+		if ((void *)(tcp + 1) > data_end)
+			return -1;
+		*out_dport = bpf_ntohs(tcp->dest);
+	} else if (ip->protocol == IPPROTO_UDP) {
+		struct udphdr *udp = (void *)ip + (ip->ihl * 4);
+		if ((void *)(udp + 1) > data_end)
+			return -1;
+		*out_dport = bpf_ntohs(udp->dest);
+	}
 
 	*out_ip = ip;
 	return 0;
@@ -70,14 +86,20 @@ int nie_egress(struct __sk_buff *skb)
 		return TC_ACT_OK;
 
 	struct iphdr *ip = 0;
-	if (parse_ipv4(skb, &ip) != 0)
+	__u16 dport = 0;
+	if (parse_ipv4_dport(skb, &ip, &dport) != 0)
 		return TC_ACT_OK;
 
 	struct allow_key key = {};
 	/* Copy bytes directly from packet (network order) to match userspace netip.Addr.As4(). */
 	__builtin_memcpy(key.addr, &ip->daddr, sizeof(ip->daddr));
+	key.dport = dport;
 
 	struct allow_value *val = bpf_map_lookup_elem(&allow_map, &key);
+	if (!val) {
+		key.dport = 0;
+		val = bpf_map_lookup_elem(&allow_map, &key);
+	}
 	__u64 now = bpf_ktime_get_ns();
 	if (val && val->expires_at_mono_ns >= now)
 		return TC_ACT_OK;

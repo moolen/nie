@@ -36,8 +36,11 @@ func TestServeDNS_EnforceDeniedHostReturnsRefused(t *testing.T) {
 func TestServeDNS_AuditDeniedHostForwardsAndLearnsARecords(t *testing.T) {
 	var learned []string
 	srv := New(ServerConfig{
-		Mode:     config.ModeAudit,
-		Policy:   allowOnly("*.github.com"),
+		Mode:   config.ModeAudit,
+		Policy: allowOnly("*.github.com"),
+		TrustPlan: trustPlanForTests(map[string][]uint16{
+			"example.com": {0},
+		}),
 		Upstream: fakeUpstreamAnswer("example.com.", "203.0.113.10", 60),
 		Trust:    captureTrustWriter(&learned),
 		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -83,6 +86,9 @@ func TestServeDNS_IgnoresAAAARecordsForTrustLearning(t *testing.T) {
 	srv := New(ServerConfig{
 		Mode:   config.ModeAudit,
 		Policy: allowOnly("*.github.com"),
+		TrustPlan: trustPlanForTests(map[string][]uint16{
+			"api.github.com": {443},
+		}),
 		Upstream: fakeUpstream(func(q string) *dns.Msg {
 			return replyWithRecords(question(q), &dns.AAAA{
 				Hdr: dns.RR_Header{
@@ -103,6 +109,22 @@ func TestServeDNS_IgnoresAAAARecordsForTrustLearning(t *testing.T) {
 	}
 	if len(learned) != 0 {
 		t.Fatalf("learned=%v, want no IPv4 trust entries", learned)
+	}
+}
+
+func TestServeDNS_LearnsConfiguredPortsForMITMHost(t *testing.T) {
+	var learned []ebpf.TrustEntry
+	srv := New(ServerConfig{
+		Mode:      config.ModeEnforce,
+		Policy:    allowOnly("*.github.com"),
+		TrustPlan: trustPlanForTests(map[string][]uint16{"api.github.com": {443, 8443}}),
+		Upstream:  fakeUpstreamAnswer("api.github.com.", "203.0.113.10", 60),
+		Trust:     captureTrustEntries(&learned),
+	})
+
+	_ = exchangeLocal(t, srv, question("api.github.com."))
+	if len(learned) != 2 {
+		t.Fatalf("learned = %v, want 2 port-specific entries", learned)
 	}
 }
 
@@ -335,6 +357,35 @@ func captureTrustWriter(learned *[]string) *trustWriterCapture {
 func (w *trustWriterCapture) Allow(ctx context.Context, entry ebpf.TrustEntry) error {
 	*w.learned = append(*w.learned, entry.IPv4.String())
 	return nil
+}
+
+type trustEntryCapture struct {
+	learned *[]ebpf.TrustEntry
+}
+
+func captureTrustEntries(learned *[]ebpf.TrustEntry) *trustEntryCapture {
+	return &trustEntryCapture{learned: learned}
+}
+
+func (w *trustEntryCapture) Allow(ctx context.Context, entry ebpf.TrustEntry) error {
+	*w.learned = append(*w.learned, entry)
+	return nil
+}
+
+type trustPlanStub struct {
+	portsByHost map[string][]uint16
+}
+
+func trustPlanForTests(portsByHost map[string][]uint16) *trustPlanStub {
+	return &trustPlanStub{portsByHost: portsByHost}
+}
+
+func (p *trustPlanStub) PortsForHost(host string) ([]uint16, bool) {
+	ports, ok := p.portsByHost[host]
+	if !ok {
+		return nil, false
+	}
+	return ports, true
 }
 
 type responseRecorder struct {

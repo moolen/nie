@@ -19,8 +19,11 @@ type Upstream interface {
 }
 
 type ServerConfig struct {
-	Mode     config.Mode
-	Policy   interface{ Allows(string) bool }
+	Mode      config.Mode
+	Policy    interface{ Allows(string) bool }
+	TrustPlan interface {
+		PortsForHost(string) ([]uint16, bool)
+	}
 	Upstream Upstream
 	Trust    ebpf.TrustWriter
 	MaxTTL   time.Duration
@@ -28,8 +31,11 @@ type ServerConfig struct {
 }
 
 type Server struct {
-	mode     config.Mode
-	policy   interface{ Allows(string) bool }
+	mode      config.Mode
+	policy    interface{ Allows(string) bool }
+	trustPlan interface {
+		PortsForHost(string) ([]uint16, bool)
+	}
 	upstream Upstream
 	trust    ebpf.TrustWriter
 	maxTTL   time.Duration
@@ -68,13 +74,14 @@ func New(cfg ServerConfig) *Server {
 	}
 
 	return &Server{
-		mode:     cfg.Mode,
-		policy:   p,
-		upstream: cfg.Upstream,
-		trust:    tw,
-		maxTTL:   maxTTL,
-		logger:   l,
-		timeout:  defaultUpstreamTimeout,
+		mode:      cfg.Mode,
+		policy:    p,
+		trustPlan: cfg.TrustPlan,
+		upstream:  cfg.Upstream,
+		trust:     tw,
+		maxTTL:    maxTTL,
+		logger:    l,
+		timeout:   defaultUpstreamTimeout,
 	}
 }
 
@@ -106,7 +113,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	}
 
 	resp := s.exchangeUpstream(req)
-	s.learnARecords(resp)
+	s.learnARecords(host, resp)
 	_ = w.WriteMsg(resp)
 }
 
@@ -129,8 +136,13 @@ func (s *Server) exchangeUpstream(req *dns.Msg) *dns.Msg {
 	return resp
 }
 
-func (s *Server) learnARecords(resp *dns.Msg) {
-	if resp == nil || s.trust == nil {
+func (s *Server) learnARecords(host string, resp *dns.Msg) {
+	if resp == nil || s.trust == nil || s.trustPlan == nil {
+		return
+	}
+
+	ports, ok := s.trustPlan.PortsForHost(host)
+	if !ok {
 		return
 	}
 
@@ -143,10 +155,12 @@ func (s *Server) learnARecords(resp *dns.Msg) {
 			continue
 		}
 
-		entry, err := ebpf.NewEntry(a.A.String(), rr.Header().Ttl, now, s.maxTTL)
-		if err != nil {
-			continue
+		for _, port := range ports {
+			entry, err := ebpf.NewEntry(a.A.String(), port, rr.Header().Ttl, now, s.maxTTL)
+			if err != nil {
+				continue
+			}
+			_ = s.trust.Allow(ctx, entry)
 		}
-		_ = s.trust.Allow(ctx, entry)
 	}
 }

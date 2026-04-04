@@ -14,8 +14,10 @@ import (
 )
 
 type bpfAllowKey struct {
-	_    structs.HostLayout
-	Addr [4]uint8
+	_     structs.HostLayout
+	Addr  [4]uint8
+	Dport uint16
+	Pad   uint16
 }
 
 type bpfAllowValue struct {

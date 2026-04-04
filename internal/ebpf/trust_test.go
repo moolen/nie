@@ -8,7 +8,7 @@ import (
 
 func TestNewEntryClampsTTLToMax(t *testing.T) {
 	now := time.Unix(1700000000, 0)
-	entry, err := NewEntry("203.0.113.10", 600, now, 300*time.Second)
+	entry, err := NewEntry("203.0.113.10", 0, 600, now, 300*time.Second)
 	if err != nil {
 		t.Fatalf("NewEntry() error = %v", err)
 	}
@@ -22,7 +22,7 @@ func TestNewEntryClampsTTLToMax(t *testing.T) {
 
 func TestNewEntryClampsZeroTTLToMax(t *testing.T) {
 	now := time.Unix(1700000000, 0)
-	entry, err := NewEntry("203.0.113.10", 0, now, 300*time.Second)
+	entry, err := NewEntry("203.0.113.10", 0, 0, now, 300*time.Second)
 	if err != nil {
 		t.Fatalf("NewEntry() error = %v", err)
 	}
@@ -32,8 +32,19 @@ func TestNewEntryClampsZeroTTLToMax(t *testing.T) {
 }
 
 func TestNewEntryRejectsInvalidIPv4(t *testing.T) {
-	_, err := NewEntry("2001:db8::1", 60, time.Now(), 5*time.Minute)
+	_, err := NewEntry("2001:db8::1", 443, 60, time.Now(), 5*time.Minute)
 	if err == nil {
 		t.Fatal("NewEntry() error = nil, want invalid IPv4 error")
+	}
+}
+
+func TestNewEntry_WithPort(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	entry, err := NewEntry("203.0.113.10", 443, 60, now, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("NewEntry() error = %v", err)
+	}
+	if entry.Port != 443 {
+		t.Fatalf("Port = %d, want 443", entry.Port)
 	}
 }

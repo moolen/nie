@@ -260,9 +260,13 @@ func runtimeMode(mode config.Mode) (uint32, error) {
 
 // allowKey/allowValue mirror bpf/include/common.h structs:
 //
-//	struct allow_key { __u8 addr[4]; };
+//	struct allow_key { __u8 addr[4]; __u16 dport; __u16 pad; };
 //	struct allow_value { __u64 expires_at_mono_ns; };
-type allowKey = [4]byte
+type allowKey struct {
+	Addr  [4]byte
+	Dport uint16
+	Pad   uint16
+}
 
 type allowValue struct {
 	ExpiresAtMonoNs uint64
@@ -592,12 +596,12 @@ func encodeEntry(entry TrustEntry, now time.Time, nowMonoNs uint64) (allowKey, a
 	dNs := d.Nanoseconds()
 	if dNs < 0 {
 		// Callers should reject expired entries before encoding, but keep this safe.
-		return entry.IPv4.As4(), allowValue{ExpiresAtMonoNs: nowMonoNs}
+		return allowKey{Addr: entry.IPv4.As4(), Dport: entry.Port}, allowValue{ExpiresAtMonoNs: nowMonoNs}
 	}
 	if uint64(dNs) > math.MaxUint64-nowMonoNs {
-		return entry.IPv4.As4(), allowValue{ExpiresAtMonoNs: math.MaxUint64}
+		return allowKey{Addr: entry.IPv4.As4(), Dport: entry.Port}, allowValue{ExpiresAtMonoNs: math.MaxUint64}
 	}
-	return entry.IPv4.As4(), allowValue{ExpiresAtMonoNs: nowMonoNs + uint64(dNs)}
+	return allowKey{Addr: entry.IPv4.As4(), Dport: entry.Port}, allowValue{ExpiresAtMonoNs: nowMonoNs + uint64(dNs)}
 }
 
 type trustWriter struct {

@@ -9,6 +9,7 @@ import (
 
 type TrustEntry struct {
 	IPv4      netip.Addr
+	Port      uint16
 	ExpiresAt time.Time
 }
 

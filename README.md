@@ -87,6 +87,18 @@ The repository includes a Vagrant workflow under `vm/vagrant` for validating `ni
 inside a clean Ubuntu guest with the `virtualbox` provider. The guest mounts the
 current repository and runs tests directly from that synced working tree.
 
+`make vm-test` now exercises the real guest datapath on a non-loopback interface.
+The host runner starts a small fixture service on the Vagrant private network, and
+the guest VM reaches that fixture over its routed private-network path instead of
+loopback.
+
+The VM suite covers:
+
+- default-deny before DNS learning for real egress to the host-side fixture
+- allow-after-learning once an allowed hostname resolves to the same fixture IPv4
+- denied hostnames returning `REFUSED` in `enforce`
+- `audit` logging for both `would_deny_dns` and `would_deny_egress`
+
 Host prerequisites:
 
 - `vagrant`

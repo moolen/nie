@@ -17,6 +17,8 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+const vmBlockedHost = "blocked.vm.test"
+
 func TestVMEnforceBlocksThenAllowsRealEgress(t *testing.T) {
 	harness := newVMNieHarness(t, vmScenario{mode: "enforce"})
 	run := harness.start(t)
@@ -63,11 +65,45 @@ func TestVMAuditLogsWouldDenyDNSAndEgress(t *testing.T) {
 }
 
 func TestVMLongLivedProcessRecoversAcrossNieRestart(t *testing.T) {
-	if os.Getenv("NIE_VM_E2E") != "1" {
-		t.Skip("vm e2e disabled")
+	harness := newVMNieHarness(t, vmScenario{mode: "enforce"})
+	probe := startVMProbe(t, harness)
+
+	cursor := 0
+	cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
+		"kind=tcp", "phase=direct", "result=success",
+	)
+	cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
+		"kind=dns", "phase=blocked-upstream", "result=success",
+	)
+
+	for cycle := 0; cycle < 2; cycle++ {
+		run := harness.start(t)
+
+		cursor = waitForProbeStateOneOf(t, probe.waitCh, probe.logs, cursor,
+			[]string{"kind=tcp", "phase=direct", "result=timeout"},
+			[]string{"kind=tcp", "phase=direct", "result=error"},
+		)
+		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
+			"kind=dns", "phase=blocked-proxy", "result=refused",
+		)
+		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
+			"kind=dns", "phase=allowed-proxy", "result=success",
+		)
+		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
+			"kind=tcp", "phase=learned", "result=success",
+		)
+
+		harness.stop(t, run)
+
+		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
+			"kind=tcp", "phase=direct", "result=success",
+		)
+		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
+			"kind=dns", "phase=blocked-upstream", "result=success",
+		)
 	}
 
-	t.Fatal("not implemented")
+	stopVMProbe(t, probe)
 }
 
 type vmFixture struct {
@@ -82,12 +118,14 @@ type vmScenario struct {
 }
 
 type vmNieHarness struct {
-	root        string
-	binPath     string
-	configPath  string
-	listenAddr  string
-	fixture     vmFixture
-	allowedHost string
+	root         string
+	binPath      string
+	configPath   string
+	listenAddr   string
+	upstreamAddr string
+	fixture      vmFixture
+	allowedHost  string
+	blockedHost  string
 }
 
 type vmRun struct {
@@ -99,6 +137,14 @@ type vmRun struct {
 	procDone    <-chan struct{}
 	cmd         *exec.Cmd
 	stopped     bool
+}
+
+type vmProbeRun struct {
+	logs     *lockedBuffer
+	waitCh   <-chan error
+	procDone <-chan struct{}
+	cmd      *exec.Cmd
+	stopped  bool
 }
 
 func newVMNieHarness(t *testing.T, scenario vmScenario) *vmNieHarness {
@@ -136,12 +182,14 @@ func newVMNieHarness(t *testing.T, scenario vmScenario) *vmNieHarness {
 	writeVMConfig(t, configPath, scenario.mode, iface, listenAddr, upstreamAddr, scenario.allowHosts)
 
 	return &vmNieHarness{
-		root:        root,
-		binPath:     binPath,
-		configPath:  configPath,
-		listenAddr:  listenAddr,
-		fixture:     fixture,
-		allowedHost: allowedHost,
+		root:         root,
+		binPath:      binPath,
+		configPath:   configPath,
+		listenAddr:   listenAddr,
+		upstreamAddr: upstreamAddr,
+		fixture:      fixture,
+		allowedHost:  allowedHost,
+		blockedHost:  vmBlockedHost,
 	}
 }
 
@@ -300,6 +348,69 @@ policy:
 	}
 }
 
+func buildVMProbeBinary(t *testing.T, root, out string) {
+	t.Helper()
+
+	cmd := exec.Command("go", "build", "-o", out, "./test/cmd/vmprobe")
+	cmd.Dir = root
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./test/cmd/vmprobe: %v\n%s", err, output)
+	}
+}
+
+func startVMProbe(t *testing.T, harness *vmNieHarness) *vmProbeRun {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "vmprobe")
+	buildVMProbeBinary(t, harness.root, binPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	cmd := exec.CommandContext(ctx, binPath,
+		"-fixture", harness.fixture.Address,
+		"-proxy-dns", harness.listenAddr,
+		"-upstream-dns", harness.upstreamAddr,
+		"-allowed-host", harness.allowedHost,
+		"-blocked-host", harness.blockedHost,
+		"-interval", "200ms",
+		"-timeout", "300ms",
+	)
+	cmd.Dir = harness.root
+
+	var logs lockedBuffer
+	cmd.Stdout = &logs
+	cmd.Stderr = &logs
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start vmprobe: %v", err)
+	}
+
+	waitCh := make(chan error, 1)
+	procDone := make(chan struct{})
+	go func() {
+		waitCh <- cmd.Wait()
+		close(waitCh)
+		close(procDone)
+	}()
+
+	run := &vmProbeRun{
+		logs:     &logs,
+		waitCh:   waitCh,
+		procDone: procDone,
+		cmd:      cmd,
+	}
+
+	t.Cleanup(func() {
+		if !run.stopped {
+			gracefulStopVMNie(cmd, procDone)
+		}
+	})
+
+	return run
+}
+
 func waitForLogLine(t *testing.T, waitCh <-chan error, logs *lockedBuffer, needles ...string) {
 	t.Helper()
 
@@ -321,6 +432,54 @@ func waitForLogLine(t *testing.T, waitCh <-chan error, logs *lockedBuffer, needl
 	}
 
 	t.Fatalf("timed out waiting for log line %q; logs=%s", strings.Join(needles, " "), logs.String())
+}
+
+func waitForProbeState(t *testing.T, waitCh <-chan error, logs *lockedBuffer, cursor int, needles ...string) int {
+	t.Helper()
+
+	return waitForProbeStateOneOf(t, waitCh, logs, cursor, needles)
+}
+
+func waitForProbeStateOneOf(t *testing.T, waitCh <-chan error, logs *lockedBuffer, cursor int, alternatives ...[]string) int {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := logs.String()
+		if cursor > len(snapshot) {
+			cursor = len(snapshot)
+		}
+		search := snapshot[cursor:]
+		offset := 0
+		for _, line := range strings.SplitAfter(search, "\n") {
+			trimmed := strings.TrimSuffix(line, "\n")
+			for _, needles := range alternatives {
+				if logLineContainsAll(trimmed, needles...) {
+					return cursor + offset + len(line)
+				}
+			}
+			offset += len(line)
+		}
+
+		select {
+		case err := <-waitCh:
+			t.Fatalf("vmprobe exited before probe state %q: %v; logs=%s", formatProbeAlternatives(alternatives), err, logs.String())
+		default:
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for probe state %q; logs=%s", formatProbeAlternatives(alternatives), logs.String())
+	return cursor
+}
+
+func formatProbeAlternatives(alternatives [][]string) string {
+	parts := make([]string, 0, len(alternatives))
+	for _, needles := range alternatives {
+		parts = append(parts, strings.Join(needles, " "))
+	}
+	return strings.Join(parts, " OR ")
 }
 
 func logLineContainsAll(line string, needles ...string) bool {
@@ -424,6 +583,29 @@ func gracefulStopVMNie(cmd *exec.Cmd, procDone <-chan struct{}) {
 	select {
 	case <-procDone:
 	case <-time.After(2 * time.Second):
+	}
+}
+
+func stopVMProbe(t *testing.T, run *vmProbeRun) {
+	t.Helper()
+
+	if run == nil || run.cmd == nil || run.cmd.Process == nil {
+		t.Fatal("vmprobe process is not running")
+	}
+	if run.stopped {
+		return
+	}
+	run.stopped = true
+
+	if err := run.cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("signal vmprobe: %v", err)
+	}
+	forced, err := waitForVMNieExit(run.cmd, run.waitCh, run.procDone, 2*time.Second, 2*time.Second)
+	if err != nil && !forced {
+		t.Fatalf("wait for vmprobe exit: %v; logs=%s", err, run.logs.String())
+	}
+	if err != nil && forced {
+		t.Logf("vmprobe killed after timeout: %v", err)
 	}
 }
 

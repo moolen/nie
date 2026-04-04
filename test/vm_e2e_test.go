@@ -5,9 +5,7 @@ package test
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -182,7 +180,7 @@ func assertFixtureBlocked(t *testing.T, fixtureAddr string, waitCh <-chan error,
 	default:
 	}
 
-	if err := fetchFixtureHealthz(fixtureAddr, 1500*time.Millisecond); err == nil {
+	if err := dialFixture(fixtureAddr, 1500*time.Millisecond); err == nil {
 		t.Fatalf("direct egress to fixture %s succeeded before DNS learning; logs=%s", fixtureAddr, logs.String())
 	}
 }
@@ -209,7 +207,7 @@ func waitForFixtureReachable(t *testing.T, fixtureAddr string, waitCh <-chan err
 		default:
 		}
 
-		if err := fetchFixtureHealthz(fixtureAddr, time.Second); err == nil {
+		if err := dialFixture(fixtureAddr, time.Second); err == nil {
 			return
 		}
 
@@ -219,24 +217,10 @@ func waitForFixtureReachable(t *testing.T, fixtureAddr string, waitCh <-chan err
 	t.Fatalf("timed out waiting for fixture %s to become reachable; logs=%s", fixtureAddr, logs.String())
 }
 
-func fetchFixtureHealthz(addr string, timeout time.Duration) error {
-	client := &http.Client{Timeout: timeout}
-
-	resp, err := client.Get("http://" + addr + "/healthz")
+func dialFixture(addr string, timeout time.Duration) error {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status = %d", resp.StatusCode)
-	}
-	if string(body) != "ok\n" {
-		return fmt.Errorf("body = %q", string(body))
-	}
-	return nil
+	return conn.Close()
 }

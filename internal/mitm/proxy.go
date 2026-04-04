@@ -250,15 +250,8 @@ func (p *Proxy) handleHTTP1Connection(ctx context.Context, downstream net.Conn, 
 }
 
 func (p *Proxy) handleHTTP2Connection(ctx context.Context, downstream net.Conn, host string, destination netip.AddrPort) error {
-	transport := &http.Transport{
-		ForceAttemptHTTP2: true,
-		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return p.openUpstreamTLS(ctx, host, destination)
-		},
-	}
-	defer transport.CloseIdleConnections()
-
-	client := &http.Client{Transport: transport}
+	upstream := newHTTP2UpstreamRoundTripper(host, destination, p.openUpstreamTLS)
+	defer upstream.Close()
 
 	var (
 		handlerErr error
@@ -289,7 +282,7 @@ func (p *Proxy) handleHTTP2Connection(ctx context.Context, downstream net.Conn, 
 		upstreamReq.URL = cloneUpstreamURL(req.URL, host)
 		upstreamReq.Host = req.Host
 
-		resp, err := client.Do(upstreamReq)
+		resp, err := upstream.RoundTrip(upstreamReq)
 		if err != nil {
 			http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 			return
@@ -318,6 +311,103 @@ func (p *Proxy) handleHTTP2Connection(ctx context.Context, downstream net.Conn, 
 	})
 
 	return handlerErr
+}
+
+type upstreamTLSRoundTripper struct {
+	host        string
+	destination netip.AddrPort
+	open        func(context.Context, string, netip.AddrPort) (net.Conn, error)
+
+	mu          sync.Mutex
+	initialized bool
+	h2Transport *http2.Transport
+	h2Conn      *http2.ClientConn
+	h1Transport *http.Transport
+}
+
+func newHTTP2UpstreamRoundTripper(
+	host string,
+	destination netip.AddrPort,
+	open func(context.Context, string, netip.AddrPort) (net.Conn, error),
+) *upstreamTLSRoundTripper {
+	return &upstreamTLSRoundTripper{
+		host:        host,
+		destination: destination,
+		open:        open,
+	}
+}
+
+func (r *upstreamTLSRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	h2Conn, h1Transport, err := r.ensureInitialized(req.Context())
+	if err != nil {
+		return nil, err
+	}
+	if h2Conn != nil {
+		return h2Conn.RoundTrip(req)
+	}
+	return h1Transport.RoundTrip(req)
+}
+
+func (r *upstreamTLSRoundTripper) ensureInitialized(ctx context.Context) (*http2.ClientConn, *http.Transport, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.initialized {
+		return r.h2Conn, r.h1Transport, nil
+	}
+
+	conn, err := r.open(ctx, r.host, r.destination)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if negotiatedProtocol(conn) == "h2" {
+		transport := &http2.Transport{}
+		clientConn, err := transport.NewClientConn(conn)
+		if err != nil {
+			_ = conn.Close()
+			return nil, nil, err
+		}
+		r.h2Transport = transport
+		r.h2Conn = clientConn
+	} else {
+		_ = conn.Close()
+		r.h1Transport = &http.Transport{
+			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return r.open(ctx, r.host, r.destination)
+			},
+		}
+	}
+
+	r.initialized = true
+	return r.h2Conn, r.h1Transport, nil
+}
+
+func (r *upstreamTLSRoundTripper) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var firstErr error
+	if r.h2Conn != nil {
+		if err := r.h2Conn.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if r.h1Transport != nil {
+		r.h1Transport.CloseIdleConnections()
+	}
+	return firstErr
+}
+
+func negotiatedProtocol(conn net.Conn) string {
+	type tlsStateConn interface {
+		ConnectionState() tls.ConnectionState
+	}
+	stateful, ok := conn.(tlsStateConn)
+	if !ok {
+		return ""
+	}
+	return stateful.ConnectionState().NegotiatedProtocol
 }
 
 func (p *Proxy) handleMissingSNI(ctx context.Context, classified ClassifiedConn) error {

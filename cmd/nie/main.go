@@ -265,6 +265,7 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 			tlsConn := tls.Client(rawConn, &tls.Config{
 				ServerName: serverName,
 				MinVersion: tls.VersionTLS12,
+				NextProtos: []string{"h2", "http/1.1"},
 			})
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
 				_ = rawConn.Close()

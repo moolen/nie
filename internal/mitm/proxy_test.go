@@ -522,6 +522,7 @@ func TestProxy_HandlesConcurrentHTTP2StreamsOnOneConnection(t *testing.T) {
 		},
 		upstreamResponseBody: "h2",
 		upstreamResponseGate: releaseResponses,
+		upstreamHTTP2:        true,
 	})
 
 	clientConn, serverConn := net.Pipe()
@@ -606,6 +607,9 @@ func TestProxy_HandlesConcurrentHTTP2StreamsOnOneConnection(t *testing.T) {
 	_ = clientConn.Close()
 	if err := <-done; err != nil {
 		t.Fatalf("HandleClassifiedConnection() error = %v", err)
+	}
+	if proxy.upstreamDialCount() != 1 {
+		t.Fatalf("upstream dial count = %d, want 1", proxy.upstreamDialCount())
 	}
 }
 
@@ -811,6 +815,7 @@ type testProxyOptions struct {
 	mitmRules            []httppolicy.Rule
 	upstreamResponseBody string
 	upstreamResponseGate <-chan struct{}
+	upstreamHTTP2        bool
 	upstreamErr          error
 	rawUpstreamReply     string
 	enableRawTCPUpstream bool
@@ -859,11 +864,13 @@ func newTestProxy(t *testing.T, opts testProxyOptions) *testProxy {
 	}
 
 	upstream := &recordingUpstream{
-		responseBody: opts.upstreamResponseBody,
-		responseGate: opts.upstreamResponseGate,
-		err:          opts.upstreamErr,
-		requests:     make(chan *http.Request, 8),
-		rawReply:     opts.rawUpstreamReply,
+		responseBody:     opts.upstreamResponseBody,
+		responseGate:     opts.upstreamResponseGate,
+		http2:            opts.upstreamHTTP2,
+		leafCertificates: leafCache,
+		err:              opts.upstreamErr,
+		requests:         make(chan *http.Request, 8),
+		rawReply:         opts.rawUpstreamReply,
 	}
 
 	proxy, err := NewProxy(ProxyConfig{
@@ -970,24 +977,35 @@ func readResponseBody(t *testing.T, resp *http.Response) string {
 }
 
 type recordingUpstream struct {
-	responseBody string
-	responseGate <-chan struct{}
-	err          error
-	requests     chan *http.Request
-	rawReply     string
+	responseBody     string
+	responseGate     <-chan struct{}
+	http2            bool
+	leafCertificates interface {
+		CertificateForHost(string) (*tls.Certificate, error)
+	}
+	err      error
+	requests chan *http.Request
+	rawReply string
 
 	mu        sync.Mutex
 	dialCalls int
 }
 
-func (u *recordingUpstream) dialTLS(context.Context, string, netip.AddrPort) (net.Conn, error) {
+func (u *recordingUpstream) dialTLS(_ context.Context, serverName string, _ netip.AddrPort) (net.Conn, error) {
 	if u.err != nil {
 		return nil, u.err
 	}
 	u.mu.Lock()
 	u.dialCalls++
 	u.mu.Unlock()
+	if u.http2 {
+		return u.dialHTTP2TLS(serverName)
+	}
 
+	return u.dialHTTP1TLS(), nil
+}
+
+func (u *recordingUpstream) dialHTTP1TLS() net.Conn {
 	clientConn, serverConn := net.Pipe()
 	go func() {
 		defer serverConn.Close()
@@ -1026,7 +1044,57 @@ func (u *recordingUpstream) dialTLS(context.Context, string, netip.AddrPort) (ne
 			}
 		}
 	}()
-	return clientConn, nil
+	return clientConn
+}
+
+func (u *recordingUpstream) dialHTTP2TLS(serverName string) (net.Conn, error) {
+	clientConn, serverConn := net.Pipe()
+	leaf, err := u.leafCertificates.CertificateForHost(serverName)
+	if err != nil {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+		return nil, err
+	}
+
+	serverTLS := tls.Server(serverConn, &tls.Config{
+		Certificates: []tls.Certificate{*leaf},
+		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{"h2", "http/1.1"},
+	})
+	clientTLS := tls.Client(clientConn, &tls.Config{
+		ServerName:         serverName,
+		InsecureSkipVerify: true,
+		MinVersion:         tls.VersionTLS12,
+		NextProtos:         []string{"h2", "http/1.1"},
+	})
+
+	go func() {
+		if err := serverTLS.Handshake(); err != nil {
+			_ = serverTLS.Close()
+			return
+		}
+		http2Server := &http2.Server{}
+		http2Server.ServeConn(serverTLS, &http2.ServeConnOpts{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				u.requests <- req.Clone(req.Context())
+				if u.responseGate != nil {
+					<-u.responseGate
+				}
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(u.responseBody)))
+				_, _ = io.WriteString(w, u.responseBody)
+			}),
+		})
+	}()
+
+	if err := clientTLS.Handshake(); err != nil {
+		_ = clientTLS.Close()
+		return nil, err
+	}
+	if clientTLS.ConnectionState().NegotiatedProtocol != "h2" {
+		_ = clientTLS.Close()
+		return nil, fmt.Errorf("negotiated upstream protocol %q, want h2", clientTLS.ConnectionState().NegotiatedProtocol)
+	}
+	return clientTLS, nil
 }
 
 func (u *recordingUpstream) dialRaw(context.Context, netip.AddrPort) (net.Conn, error) {

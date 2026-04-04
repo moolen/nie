@@ -23,6 +23,11 @@ apt-get install -y \
   nftables \
   pkg-config
 
+multiarch_include_dir="/usr/include/$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+if [ ! -e /usr/include/asm ] && [ -d "${multiarch_include_dir}/asm" ]; then
+  ln -s "${multiarch_include_dir}/asm" /usr/include/asm
+fi
+
 need_go_install=1
 if command -v go >/dev/null 2>&1; then
   current_go_version="$(go env GOVERSION 2>/dev/null || true)"

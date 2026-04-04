@@ -140,9 +140,6 @@ func dnsProbe(server, host string, timeout time.Duration) string {
 	}
 	switch resp.Rcode {
 	case dns.RcodeSuccess:
-		if len(resp.Answer) == 0 {
-			return "nxdomain"
-		}
 		return "success"
 	case dns.RcodeNameError:
 		return "nxdomain"
@@ -168,6 +165,13 @@ func normalizeAddr(addr, defaultPort string) string {
 		return addr
 	}
 	if strings.Contains(addr, ":") {
+		base := addr
+		if idx := strings.Index(base, "%"); idx != -1 {
+			base = base[:idx]
+		}
+		if ip := net.ParseIP(base); ip != nil {
+			return net.JoinHostPort(addr, defaultPort)
+		}
 		return addr
 	}
 	return net.JoinHostPort(addr, defaultPort)

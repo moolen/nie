@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"net"
+	"testing"
+	"time"
+
+	"github.com/miekg/dns"
+)
 
 func TestFormatProbeResult(t *testing.T) {
 	line := formatProbeResult(probeResult{
@@ -14,4 +20,51 @@ func TestFormatProbeResult(t *testing.T) {
 	if line != want {
 		t.Fatalf("line = %q, want %q", line, want)
 	}
+}
+
+func TestDNSProbeSuccessWithEmptyAnswer(t *testing.T) {
+	addr := startDNSServer(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		msg := new(dns.Msg)
+		msg.SetReply(r)
+		msg.Rcode = dns.RcodeSuccess
+		if err := w.WriteMsg(msg); err != nil {
+			t.Fatalf("write msg: %v", err)
+		}
+	})
+
+	result := dnsProbe(addr, "example.test", 500*time.Millisecond)
+	if result != "success" {
+		t.Fatalf("result = %q, want %q", result, "success")
+	}
+}
+
+func TestNormalizeAddrIPv6WithoutPort(t *testing.T) {
+	got := normalizeAddr("2001:db8::1", "53")
+	want := "[2001:db8::1]:53"
+	if got != want {
+		t.Fatalf("normalizeAddr = %q, want %q", got, want)
+	}
+}
+
+func startDNSServer(t *testing.T, handler dns.HandlerFunc) string {
+	t.Helper()
+
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen packet: %v", err)
+	}
+
+	server := &dns.Server{
+		PacketConn: pc,
+		Handler:    handler,
+	}
+	go func() {
+		_ = server.ActivateAndServe()
+	}()
+	t.Cleanup(func() {
+		_ = server.Shutdown()
+		_ = pc.Close()
+	})
+
+	return pc.LocalAddr().String()
 }

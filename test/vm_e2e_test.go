@@ -17,6 +17,71 @@ import (
 )
 
 func TestVMEnforceBlocksThenAllowsRealEgress(t *testing.T) {
+	run := startVMNieScenario(t, vmScenario{mode: "enforce"})
+
+	assertFixtureBlockedBeforeLearning(t, run.fixture.Address, run.waitCh, run.logs)
+
+	resp := waitForAnswer(t, run.listenAddr, run.allowedHost+".", run.waitCh, run.logs)
+	assertFixtureLearned(t, resp, run.fixture.IP)
+
+	waitForFixtureReachable(t, run.fixture.Address, run.waitCh, run.logs)
+
+	run.stopAndWait(t)
+}
+
+func TestVMEnforceDeniedHostnameReturnsRefused(t *testing.T) {
+	run := startVMNieScenario(t, vmScenario{
+		mode: "enforce",
+	})
+
+	resp := waitForAnswer(t, run.listenAddr, "blocked.vm.test.", run.waitCh, run.logs)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("rcode = %d, want %d", resp.Rcode, dns.RcodeRefused)
+	}
+
+	run.stopAndWait(t)
+}
+
+func TestVMAuditLogsWouldDenyDNSAndEgress(t *testing.T) {
+	run := startVMNieScenario(t, vmScenario{
+		mode: "audit",
+	})
+
+	waitForFixtureReachable(t, run.fixture.Address, run.waitCh, run.logs)
+	waitForLog(t, "would_deny_egress", run.waitCh, run.logs)
+
+	resp := waitForAnswer(t, run.listenAddr, "blocked.vm.test.", run.waitCh, run.logs)
+	assertFixtureLearned(t, resp, run.fixture.IP)
+	waitForLog(t, "would_deny_dns", run.waitCh, run.logs)
+	waitForLog(t, "host=blocked.vm.test", run.waitCh, run.logs)
+
+	run.stopAndWait(t)
+}
+
+type vmFixture struct {
+	Address string
+	IP      string
+	Port    string
+}
+
+type vmScenario struct {
+	mode       string
+	allowHosts []string
+}
+
+type vmRun struct {
+	fixture     vmFixture
+	allowedHost string
+	listenAddr  string
+	logs        *lockedBuffer
+	waitCh      <-chan error
+	procDone    <-chan struct{}
+	cmd         *exec.Cmd
+}
+
+func startVMNieScenario(t *testing.T, scenario vmScenario) *vmRun {
+	t.Helper()
+
 	if os.Getenv("NIE_VM_E2E") != "1" {
 		t.Skip("vm e2e disabled")
 	}
@@ -29,6 +94,12 @@ func TestVMEnforceBlocksThenAllowsRealEgress(t *testing.T) {
 	if fixtureAddr == "" || allowedHost == "" {
 		t.Fatal("missing vm e2e environment")
 	}
+	if scenario.mode == "" {
+		scenario.mode = "enforce"
+	}
+	if len(scenario.allowHosts) == 0 {
+		scenario.allowHosts = []string{allowedHost}
+	}
 
 	root := repoRoot(t)
 	tmpDir := t.TempDir()
@@ -40,10 +111,10 @@ func TestVMEnforceBlocksThenAllowsRealEgress(t *testing.T) {
 	listenAddr := pickFreeListenAddr(t)
 	upstreamAddr := startFakeUpstream(t, fixture.IP)
 	configPath := filepath.Join(tmpDir, "config.yaml")
-	writeVMConfig(t, configPath, iface, listenAddr, upstreamAddr, allowedHost)
+	writeVMConfig(t, configPath, scenario.mode, iface, listenAddr, upstreamAddr, scenario.allowHosts)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	cmd := exec.CommandContext(ctx, binPath, "-config", configPath)
 	cmd.Dir = root
@@ -70,28 +141,29 @@ func TestVMEnforceBlocksThenAllowsRealEgress(t *testing.T) {
 	waitForPinnedState(t, "/sys/fs/bpf/nie", true, waitCh, &logs)
 	waitForNieRedirectState(t, true, waitCh, &logs)
 
-	assertFixtureBlockedBeforeLearning(t, fixture.Address, waitCh, &logs)
+	return &vmRun{
+		fixture:     fixture,
+		allowedHost: allowedHost,
+		listenAddr:  listenAddr,
+		logs:        &logs,
+		waitCh:      waitCh,
+		procDone:    procDone,
+		cmd:         cmd,
+	}
+}
 
-	resp := waitForAnswer(t, listenAddr, allowedHost+".", waitCh, &logs)
-	assertFixtureLearned(t, resp, fixture.IP)
+func (r *vmRun) stopAndWait(t *testing.T) {
+	t.Helper()
 
-	waitForFixtureReachable(t, fixture.Address, waitCh, &logs)
-
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+	if err := r.cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatalf("signal nie: %v", err)
 	}
-	if err := <-waitCh; err != nil {
-		t.Fatalf("wait for nie exit: %v; logs=%s", err, logs.String())
+	if err := <-r.waitCh; err != nil {
+		t.Fatalf("wait for nie exit: %v; logs=%s", err, r.logs.String())
 	}
 
 	waitForVMPinnedStateAfterExit(t, "/sys/fs/bpf/nie", false)
 	waitForVMNieRedirectStateAfterExit(t, false)
-}
-
-type vmFixture struct {
-	Address string
-	IP      string
-	Port    string
 }
 
 func parseVMFixture(t *testing.T, raw string) vmFixture {
@@ -151,8 +223,13 @@ func routeInterfaceFor(t *testing.T, rawIP string) string {
 	return ""
 }
 
-func writeVMConfig(t *testing.T, path, iface, listenAddr, upstreamAddr, allowedHost string) {
+func writeVMConfig(t *testing.T, path, mode, iface, listenAddr, upstreamAddr string, allowHosts []string) {
 	t.Helper()
+
+	allowSection := ""
+	for _, host := range allowHosts {
+		allowSection += fmt.Sprintf("    - %s\n", host)
+	}
 
 	raw := fmt.Sprintf(`mode: enforce
 interface: %s
@@ -164,8 +241,8 @@ dns:
 policy:
   default: deny
   allow:
-    - %s
-`, iface, listenAddr, upstreamAddr, allowedHost)
+%s`, iface, listenAddr, upstreamAddr, allowSection)
+	raw = "mode: " + mode + "\n" + raw[len("mode: enforce\n"):]
 
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatalf("write vm config: %v", err)

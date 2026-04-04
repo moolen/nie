@@ -98,6 +98,8 @@ The VM suite covers:
 - allow-after-learning once an allowed hostname resolves to the same fixture IPv4
 - denied hostnames returning `REFUSED` in `enforce`
 - `audit` logging for both `would_deny_dns` and `would_deny_egress`
+- one long-lived guest process losing host-wide DNS and TCP access while `nie` is active
+- that same process recovering after `nie` shuts down, then repeating the restart/recovery cycle cleanly
 
 Host prerequisites:
 

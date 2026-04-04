@@ -56,6 +56,15 @@ func New(rules []Rule) (*Engine, error) {
 		if !isValidAction(rule.Action) {
 			return nil, fmt.Errorf("rule %d: invalid action %q", i, rule.Action)
 		}
+		if rule.Port == 0 {
+			return nil, fmt.Errorf("rule %d: port must be greater than zero", i)
+		}
+		if len(rule.Methods) == 0 {
+			return nil, fmt.Errorf("rule %d: methods must not be empty", i)
+		}
+		if len(rule.Paths) == 0 {
+			return nil, fmt.Errorf("rule %d: paths must not be empty", i)
+		}
 
 		host, err := policy.New([]string{rule.Host})
 		if err != nil {
@@ -215,9 +224,9 @@ func matchSegmentAt(pattern, segment string, pi, si int) bool {
 				pi++
 			}
 			if pi == len(pattern) {
-				return true
+				return si < len(segment)
 			}
-			for next := si; next <= len(segment); next++ {
+			for next := si + 1; next <= len(segment); next++ {
 				if matchSegmentAt(pattern, segment, pi, next) {
 					return true
 				}
@@ -234,4 +243,3 @@ func matchSegmentAt(pattern, segment string, pi, si int) bool {
 
 	return si == len(segment)
 }
-

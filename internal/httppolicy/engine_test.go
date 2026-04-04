@@ -1,6 +1,9 @@
 package httppolicy
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestEngine_EvaluateMatchesHostPortMethodAndPath(t *testing.T) {
 	eng, err := New([]Rule{{
@@ -170,3 +173,141 @@ func TestEngine_Evaluate_Table(t *testing.T) {
 	}
 }
 
+func TestNew_RejectsStructurallyInvalidRules(t *testing.T) {
+	tests := []struct {
+		name string
+		rule Rule
+	}{
+		{
+			name: "reject port zero",
+			rule: Rule{
+				Host:    "api.github.com",
+				Port:    0,
+				Methods: []string{"GET"},
+				Paths:   []string{"/repos/**"},
+				Action:  ActionAllow,
+			},
+		},
+		{
+			name: "reject empty methods",
+			rule: Rule{
+				Host:    "api.github.com",
+				Port:    443,
+				Methods: nil,
+				Paths:   []string{"/repos/**"},
+				Action:  ActionAllow,
+			},
+		},
+		{
+			name: "reject empty paths",
+			rule: Rule{
+				Host:    "api.github.com",
+				Port:    443,
+				Methods: []string{"GET"},
+				Paths:   nil,
+				Action:  ActionAllow,
+			},
+		},
+		{
+			name: "reject empty method entry",
+			rule: Rule{
+				Host:    "api.github.com",
+				Port:    443,
+				Methods: []string{"  "},
+				Paths:   []string{"/repos/**"},
+				Action:  ActionAllow,
+			},
+		},
+		{
+			name: "reject empty path entry",
+			rule: Rule{
+				Host:    "api.github.com",
+				Port:    443,
+				Methods: []string{"GET"},
+				Paths:   []string{"   "},
+				Action:  ActionAllow,
+			},
+		},
+		{
+			name: "reject invalid host pattern",
+			rule: Rule{
+				Host:    "api.*.github.com",
+				Port:    443,
+				Methods: []string{"GET"},
+				Paths:   []string{"/repos/**"},
+				Action:  ActionAllow,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New([]Rule{tt.rule})
+			if err == nil {
+				t.Fatal("New() error = nil, want non-nil")
+			}
+		})
+	}
+}
+
+func TestNew_NormalizesRuleMethodsAndPaths(t *testing.T) {
+	eng, err := New([]Rule{{
+		Host:    "api.github.com",
+		Port:    443,
+		Methods: []string{"get"},
+		Paths:   []string{"repos/**"},
+		Action:  ActionAllow,
+	}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	got, ok := eng.Evaluate(Request{
+		Host:   "api.github.com",
+		Port:   443,
+		Method: "GET",
+		Path:   "/repos/moolen/nie",
+	})
+	if !ok || got.Action != ActionAllow {
+		t.Fatalf("Evaluate() = %#v, %v; want allow, true", got, ok)
+	}
+}
+
+func TestEngine_Evaluate_StarDoesNotMatchEmptyPathSegment(t *testing.T) {
+	eng, err := New([]Rule{{
+		Host:    "**.github.com",
+		Port:    443,
+		Methods: []string{"POST"},
+		Paths:   []string{"/items/*/details"},
+		Action:  ActionAudit,
+	}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	got, ok := eng.Evaluate(Request{
+		Host:   "a.b.github.com",
+		Port:   443,
+		Method: "POST",
+		Path:   "/items//details",
+	})
+	if ok {
+		t.Fatalf("Evaluate() = %#v, %v; want no match", got, ok)
+	}
+}
+
+func TestNew_ReturnsContextForInvalidRule(t *testing.T) {
+	_, err := New([]Rule{{
+		Host:    "api.github.com",
+		Port:    0,
+		Methods: []string{"GET"},
+		Paths:   []string{"/repos/**"},
+		Action:  ActionAllow,
+	}})
+	if err == nil {
+		t.Fatal("New() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "rule 0") {
+		t.Fatalf("New() error = %q, want message containing rule index", err)
+	}
+}

@@ -601,11 +601,11 @@ func stopVMProbe(t *testing.T, run *vmProbeRun) {
 		t.Fatalf("signal vmprobe: %v", err)
 	}
 	forced, err := waitForVMNieExit(run.cmd, run.waitCh, run.procDone, 2*time.Second, 2*time.Second)
-	if err != nil && !forced {
-		t.Fatalf("wait for vmprobe exit: %v; logs=%s", err, run.logs.String())
+	if forced {
+		t.Fatalf("vmprobe required forced termination: %v; logs=%s", err, run.logs.String())
 	}
-	if err != nil && forced {
-		t.Logf("vmprobe killed after timeout: %v", err)
+	if err != nil {
+		t.Fatalf("wait for vmprobe exit: %v; logs=%s", err, run.logs.String())
 	}
 }
 
@@ -718,6 +718,60 @@ func TestReadVMNieWaitResultWaitsForDelayedSendAfterProcDone(t *testing.T) {
 	}
 	if gotErr == nil || gotErr.Error() != "delayed" {
 		t.Fatalf("err = %v, want delayed", gotErr)
+	}
+}
+
+func TestStopVMProbeRequiresCleanExit(t *testing.T) {
+	if os.Getenv("NIE_STOP_VMPROBE_SUBPROCESS") == "1" {
+		run := startStubbornVMProbeProcess(t)
+		stopVMProbe(t, run)
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestStopVMProbeRequiresCleanExit")
+	cmd.Env = append(os.Environ(), "NIE_STOP_VMPROBE_SUBPROCESS=1")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("stopVMProbe subprocess exited cleanly after forced kill, want failure")
+	}
+}
+
+func startStubbornVMProbeProcess(t *testing.T) *vmProbeRun {
+	t.Helper()
+
+	cmd := exec.Command("sh", "-c", "trap '' INT; printf ready\\n; while :; do sleep 1; done")
+
+	var logs lockedBuffer
+	cmd.Stdout = &logs
+	cmd.Stderr = &logs
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start stubborn probe: %v", err)
+	}
+
+	waitCh := make(chan error, 1)
+	procDone := make(chan struct{})
+	go func() {
+		waitCh <- cmd.Wait()
+		close(waitCh)
+		close(procDone)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(logs.String(), "ready") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(logs.String(), "ready") {
+		t.Fatalf("stubborn probe did not become ready; logs=%s", logs.String())
+	}
+
+	return &vmProbeRun{
+		logs:     &logs,
+		waitCh:   waitCh,
+		procDone: procDone,
+		cmd:      cmd,
 	}
 }
 

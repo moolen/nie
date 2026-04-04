@@ -21,6 +21,7 @@ import (
 	"github.com/moolen/nie/internal/config"
 	"github.com/moolen/nie/internal/httppolicy"
 	"github.com/moolen/nie/internal/policy"
+	"golang.org/x/net/http2"
 )
 
 func TestProxy_AllowsRequestWhenMITMRuleMatches(t *testing.T) {
@@ -505,6 +506,206 @@ func TestProxy_HandlesConcurrentHTTPSConnections(t *testing.T) {
 	}
 }
 
+func TestProxy_HandlesConcurrentHTTP2StreamsOnOneConnection(t *testing.T) {
+	logger, _ := testLogger()
+	releaseResponses := make(chan struct{})
+	proxy := newTestProxy(t, testProxyOptions{
+		logger: logger,
+		mitmRules: []httppolicy.Rule{
+			{
+				Host:    "api.github.com",
+				Port:    443,
+				Methods: []string{"GET"},
+				Paths:   []string{"/first", "/second"},
+				Action:  httppolicy.ActionAllow,
+			},
+		},
+		upstreamResponseBody: "h2",
+		upstreamResponseGate: releaseResponses,
+	})
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- proxy.HandleClassifiedConnection(context.Background(), ClassifiedConn{
+			Conn:                serverConn,
+			OriginalDestination: netip.MustParseAddrPort("203.0.113.10:443"),
+			ClientHello:         ClientHello{ServerName: "api.github.com"},
+		})
+	}()
+
+	clientTLS := tls.Client(clientConn, &tls.Config{
+		ServerName: "api.github.com",
+		RootCAs:    proxy.testRootCAs(),
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"h2"},
+	})
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatalf("clientTLS.Handshake() error = %v", err)
+	}
+	if got := clientTLS.ConnectionState().NegotiatedProtocol; got != "h2" {
+		t.Fatalf("negotiated protocol = %q, want %q", got, "h2")
+	}
+
+	h2Transport := &http2.Transport{}
+	h2Conn, err := h2Transport.NewClientConn(clientTLS)
+	if err != nil {
+		t.Fatalf("http2.Transport.NewClientConn() error = %v", err)
+	}
+	defer h2Transport.CloseIdleConnections()
+
+	type result struct {
+		path string
+		body string
+		err  error
+	}
+	resultCh := make(chan result, 2)
+	start := make(chan struct{})
+	for _, path := range []string{"/first", "/second"} {
+		go func(path string) {
+			<-start
+			req, err := http.NewRequest(http.MethodGet, "https://api.github.com"+path, nil)
+			if err != nil {
+				resultCh <- result{path: path, err: err}
+				return
+			}
+			resp, err := h2Conn.RoundTrip(req)
+			if err != nil {
+				resultCh <- result{path: path, err: err}
+				return
+			}
+			resultCh <- result{path: path, body: readResponseBody(t, resp)}
+		}(path)
+	}
+	close(start)
+
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case req := <-proxy.upstream.requests:
+			seen[requestPath(req)] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for concurrent upstream requests, saw=%v", seen)
+		}
+	}
+
+	close(releaseResponses)
+
+	for i := 0; i < 2; i++ {
+		res := <-resultCh
+		if res.err != nil {
+			t.Fatalf("RoundTrip(%s) error = %v", res.path, res.err)
+		}
+		if res.body != "h2" {
+			t.Fatalf("response body for %s = %q, want %q", res.path, res.body, "h2")
+		}
+	}
+
+	_ = clientConn.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("HandleClassifiedConnection() error = %v", err)
+	}
+}
+
+func TestProxy_KeepsHTTP2ConnectionAliveAfterDeniedStream(t *testing.T) {
+	logger, _ := testLogger()
+	proxy := newTestProxy(t, testProxyOptions{
+		logger: logger,
+		mitmRules: []httppolicy.Rule{
+			{
+				Host:    "api.github.com",
+				Port:    443,
+				Methods: []string{"GET"},
+				Paths:   []string{"/allowed"},
+				Action:  httppolicy.ActionAllow,
+			},
+		},
+		upstreamResponseBody: "ok",
+	})
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- proxy.HandleClassifiedConnection(context.Background(), ClassifiedConn{
+			Conn:                serverConn,
+			OriginalDestination: netip.MustParseAddrPort("203.0.113.10:443"),
+			ClientHello:         ClientHello{ServerName: "api.github.com"},
+		})
+	}()
+
+	clientTLS := tls.Client(clientConn, &tls.Config{
+		ServerName: "api.github.com",
+		RootCAs:    proxy.testRootCAs(),
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"h2"},
+	})
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatalf("clientTLS.Handshake() error = %v", err)
+	}
+	if got := clientTLS.ConnectionState().NegotiatedProtocol; got != "h2" {
+		t.Fatalf("negotiated protocol = %q, want %q", got, "h2")
+	}
+
+	h2Transport := &http2.Transport{}
+	h2Conn, err := h2Transport.NewClientConn(clientTLS)
+	if err != nil {
+		t.Fatalf("http2.Transport.NewClientConn() error = %v", err)
+	}
+	defer h2Transport.CloseIdleConnections()
+
+	deniedReq, err := http.NewRequest(http.MethodGet, "https://api.github.com/denied", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest(denied) error = %v", err)
+	}
+	deniedResp, err := h2Conn.RoundTrip(deniedReq)
+	if err != nil {
+		t.Fatalf("RoundTrip(denied) error = %v", err)
+	}
+	if deniedResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("denied response status = %d, want %d", deniedResp.StatusCode, http.StatusForbidden)
+	}
+	_ = deniedResp.Body.Close()
+
+	select {
+	case req := <-proxy.upstream.requests:
+		t.Fatalf("unexpected upstream request for denied stream: %s %s", req.Method, requestPath(req))
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	allowedReq, err := http.NewRequest(http.MethodGet, "https://api.github.com/allowed", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest(allowed) error = %v", err)
+	}
+	allowedResp, err := h2Conn.RoundTrip(allowedReq)
+	if err != nil {
+		t.Fatalf("RoundTrip(allowed) error = %v", err)
+	}
+	if allowedResp.StatusCode != http.StatusOK {
+		t.Fatalf("allowed response status = %d, want %d", allowedResp.StatusCode, http.StatusOK)
+	}
+	if body := readResponseBody(t, allowedResp); body != "ok" {
+		t.Fatalf("allowed response body = %q, want %q", body, "ok")
+	}
+
+	select {
+	case req := <-proxy.upstream.requests:
+		if requestPath(req) != "/allowed" {
+			t.Fatalf("upstream request path = %q, want %q", requestPath(req), "/allowed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for upstream request for allowed stream")
+	}
+
+	_ = clientConn.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("HandleClassifiedConnection() error = %v", err)
+	}
+}
+
 func TestProxy_DeniesInvalidHTTPAfterTLSHandshake(t *testing.T) {
 	logger, _ := testLogger()
 	proxy := newTestProxy(t, testProxyOptions{
@@ -609,6 +810,7 @@ type testProxyOptions struct {
 	fallbackAllow        []string
 	mitmRules            []httppolicy.Rule
 	upstreamResponseBody string
+	upstreamResponseGate <-chan struct{}
 	upstreamErr          error
 	rawUpstreamReply     string
 	enableRawTCPUpstream bool
@@ -658,8 +860,9 @@ func newTestProxy(t *testing.T, opts testProxyOptions) *testProxy {
 
 	upstream := &recordingUpstream{
 		responseBody: opts.upstreamResponseBody,
+		responseGate: opts.upstreamResponseGate,
 		err:          opts.upstreamErr,
-		requests:     make(chan *http.Request, 4),
+		requests:     make(chan *http.Request, 8),
 		rawReply:     opts.rawUpstreamReply,
 	}
 
@@ -768,6 +971,7 @@ func readResponseBody(t *testing.T, resp *http.Response) string {
 
 type recordingUpstream struct {
 	responseBody string
+	responseGate <-chan struct{}
 	err          error
 	requests     chan *http.Request
 	rawReply     string
@@ -795,6 +999,9 @@ func (u *recordingUpstream) dialTLS(context.Context, string, netip.AddrPort) (ne
 				return
 			}
 			u.requests <- req
+			if u.responseGate != nil {
+				<-u.responseGate
+			}
 
 			resp := &http.Response{
 				StatusCode:    http.StatusOK,

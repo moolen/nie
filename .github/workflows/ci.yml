@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run unit tests
+        run: go test ./... -count=1
+
+  smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build nie
+        run: |
+          mkdir -p dist
+          go build -buildvcs=false -o dist/nie ./cmd/nie
+
+      - name: Run root smoke test against built binary
+        run: |
+          sudo env "PATH=$PATH" "NIE_TEST_BIN=$PWD/dist/nie" \
+            go test -tags=integration ./test -run TestSmoke_AuditModeAllowsUnknownTrafficButEmitsWouldDeny -count=1 -v

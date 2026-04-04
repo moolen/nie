@@ -177,9 +177,10 @@ func newVMNieHarness(t *testing.T, scenario vmScenario) *vmNieHarness {
 	fixture := parseVMFixture(t, fixtureAddr)
 	iface := routeInterfaceFor(t, fixture.IP)
 	listenAddr := pickFreeListenAddr(t)
+	httpsListenAddr := pickFreeTCPAddr(t)
 	upstreamAddr := startFakeUpstream(t, fixture.IP)
 	configPath := filepath.Join(tmpDir, "config.yaml")
-	writeVMConfig(t, configPath, scenario.mode, iface, listenAddr, upstreamAddr, scenario.allowHosts)
+	writeVMConfig(t, configPath, scenario.mode, iface, listenAddr, httpsListenAddr, upstreamAddr, scenario.allowHosts)
 
 	return &vmNieHarness{
 		root:         root,
@@ -323,7 +324,7 @@ func routeInterfaceFor(t *testing.T, rawIP string) string {
 	return ""
 }
 
-func writeVMConfig(t *testing.T, path, mode, iface, listenAddr, upstreamAddr string, allowHosts []string) {
+func writeVMConfig(t *testing.T, path, mode, iface, listenAddr, httpsListenAddr, upstreamAddr string, allowHosts []string) {
 	t.Helper()
 
 	allowSection := ""
@@ -341,7 +342,12 @@ dns:
 policy:
   default: deny
   allow:
-%s`, mode, iface, listenAddr, upstreamAddr, allowSection)
+%s
+https:
+  listen: %s
+  ports:
+    - 443
+`, mode, iface, listenAddr, upstreamAddr, allowSection, httpsListenAddr)
 
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatalf("write vm config: %v", err)
@@ -351,7 +357,7 @@ policy:
 func buildVMProbeBinary(t *testing.T, root, out string) {
 	t.Helper()
 
-	cmd := exec.Command("go", "build", "-o", out, "./test/cmd/vmprobe")
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", out, "./test/cmd/vmprobe")
 	cmd.Dir = root
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build ./test/cmd/vmprobe: %v\n%s", err, output)

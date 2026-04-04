@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/moolen/nie/internal/config"
 	"github.com/moolen/nie/internal/httppolicy"
 	"github.com/moolen/nie/internal/policy"
+	"golang.org/x/net/http2"
 )
 
 var ErrHTTPSRequestDenied = errors.New("https request denied by policy")
@@ -148,6 +150,7 @@ func (p *Proxy) HandleClassifiedConnection(ctx context.Context, classified Class
 	downstreamTLS := tls.Server(withIdleTimeout(classified.Conn, p.idleTimeout), &tls.Config{
 		Certificates: []tls.Certificate{*leaf},
 		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{"h2", "http/1.1"},
 	})
 	defer downstreamTLS.Close()
 
@@ -155,7 +158,13 @@ func (p *Proxy) HandleClassifiedConnection(ctx context.Context, classified Class
 		return fmt.Errorf("complete downstream tls handshake for %q: %w", host, err)
 	}
 	downstream := withIdleTimeout(downstreamTLS, p.idleTimeout)
+	if downstreamTLS.ConnectionState().NegotiatedProtocol == "h2" {
+		return p.handleHTTP2Connection(ctx, downstream, host, classified.OriginalDestination)
+	}
+	return p.handleHTTP1Connection(ctx, downstream, host, classified.OriginalDestination)
+}
 
+func (p *Proxy) handleHTTP1Connection(ctx context.Context, downstream net.Conn, host string, destination netip.AddrPort) error {
 	reader := bufio.NewReaderSize(downstream, p.readerBufferSize())
 	var (
 		upstream       net.Conn
@@ -182,18 +191,18 @@ func (p *Proxy) HandleClassifiedConnection(ctx context.Context, classified Class
 			return fmt.Errorf("read downstream http request for %q: %w", host, err)
 		}
 
-		action, matchedMITM := p.requestAction(host, classified.OriginalDestination.Port(), req)
+		action, matchedMITM := p.requestAction(host, destination.Port(), req)
 		if !p.allowAction(action) {
 			_ = req.Body.Close()
 			return ErrHTTPSRequestDenied
 		}
 		if shouldLogAction(action, p.mode) {
-			p.logWouldDeny(classified.OriginalDestination.Port(), host, req.Method, requestPath(req), action, matchedMITM)
+			p.logWouldDeny(destination.Port(), host, req.Method, requestPath(req), action, matchedMITM)
 		}
 		closeAfterRequest := requestWantsClose(req)
 
 		if upstream == nil {
-			upstream, err = p.openUpstreamTLS(ctx, host, classified.OriginalDestination)
+			upstream, err = p.openUpstreamTLS(ctx, host, destination)
 			if err != nil {
 				_ = req.Body.Close()
 				return fmt.Errorf("open upstream tls connection for %q: %w", host, err)
@@ -238,6 +247,77 @@ func (p *Proxy) HandleClassifiedConnection(ctx context.Context, classified Class
 			return nil
 		}
 	}
+}
+
+func (p *Proxy) handleHTTP2Connection(ctx context.Context, downstream net.Conn, host string, destination netip.AddrPort) error {
+	transport := &http.Transport{
+		ForceAttemptHTTP2: true,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return p.openUpstreamTLS(ctx, host, destination)
+		},
+	}
+	defer transport.CloseIdleConnections()
+
+	client := &http.Client{Transport: transport}
+
+	var (
+		handlerErr error
+		errOnce    sync.Once
+	)
+	fail := func(err error) {
+		if err == nil {
+			return
+		}
+		errOnce.Do(func() {
+			handlerErr = err
+			_ = downstream.Close()
+		})
+	}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		action, matchedMITM := p.requestAction(host, destination.Port(), req)
+		if !p.allowAction(action) {
+			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			return
+		}
+		if shouldLogAction(action, p.mode) {
+			p.logWouldDeny(destination.Port(), host, req.Method, requestPath(req), action, matchedMITM)
+		}
+
+		upstreamReq := req.Clone(req.Context())
+		upstreamReq.RequestURI = ""
+		upstreamReq.URL = cloneUpstreamURL(req.URL, host)
+		upstreamReq.Host = req.Host
+
+		resp, err := client.Do(upstreamReq)
+		if err != nil {
+			http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		copyHeader(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			fail(fmt.Errorf("forward downstream http response for %q: %w", host, err))
+		}
+	})
+
+	server := &http2.Server{
+		IdleTimeout: p.idleTimeout,
+	}
+	server.ServeConn(downstream, &http2.ServeConnOpts{
+		Context: ctx,
+		Handler: handler,
+		BaseConfig: &http.Server{
+			Handler:           handler,
+			IdleTimeout:       p.idleTimeout,
+			ReadHeaderTimeout: p.idleTimeout,
+			MaxHeaderBytes:    p.maxHeaderBytes,
+		},
+	})
+
+	return handlerErr
 }
 
 func (p *Proxy) handleMissingSNI(ctx context.Context, classified ClassifiedConn) error {
@@ -310,6 +390,30 @@ func requestPath(req *http.Request) string {
 		return "/"
 	}
 	return req.URL.Path
+}
+
+func cloneUpstreamURL(src *url.URL, host string) *url.URL {
+	dst := &url.URL{
+		Scheme: "https",
+		Host:   host,
+		Path:   "/",
+	}
+	if src == nil {
+		return dst
+	}
+	*dst = *src
+	dst.Scheme = "https"
+	dst.Host = host
+	if dst.Path == "" {
+		dst.Path = "/"
+	}
+	return dst
+}
+
+func copyHeader(dst, src http.Header) {
+	for key, values := range src {
+		dst[key] = append([]string(nil), values...)
+	}
 }
 
 func requestWantsClose(req *http.Request) bool {

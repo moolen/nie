@@ -28,13 +28,13 @@ func TestSmoke_AuditModeAllowsUnknownTrafficButEmitsWouldDeny(t *testing.T) {
 	root := repoRoot(t)
 	tmpDir := t.TempDir()
 
-	binPath := filepath.Join(tmpDir, "nie")
-	buildNieBinary(t, root, binPath)
+	binPath := resolveNieBinary(t, root, tmpDir)
 
 	upstreamAddr := startFakeUpstream(t, "203.0.113.7")
 	listenAddr := pickFreeListenAddr(t)
+	httpsListenAddr := pickFreeTCPAddr(t)
 	configPath := filepath.Join(tmpDir, "config.yaml")
-	writeConfig(t, configPath, listenAddr, upstreamAddr)
+	writeConfig(t, configPath, listenAddr, httpsListenAddr, upstreamAddr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -116,11 +116,23 @@ func repoRoot(t *testing.T) string {
 func buildNieBinary(t *testing.T, root, out string) {
 	t.Helper()
 
-	cmd := exec.Command("go", "build", "-o", out, "./cmd/nie")
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", out, "./cmd/nie")
 	cmd.Dir = root
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build ./cmd/nie: %v\n%s", err, output)
 	}
+}
+
+func resolveNieBinary(t *testing.T, root, tmpDir string) string {
+	t.Helper()
+
+	if path := strings.TrimSpace(os.Getenv("NIE_TEST_BIN")); path != "" {
+		return path
+	}
+
+	binPath := filepath.Join(tmpDir, "nie")
+	buildNieBinary(t, root, binPath)
+	return binPath
 }
 
 func startFakeUpstream(t *testing.T, answerIP string) string {
@@ -170,27 +182,48 @@ func startFakeUpstream(t *testing.T, answerIP string) string {
 func pickFreeListenAddr(t *testing.T) string {
 	t.Helper()
 
+	for range 32 {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve tcp port: %v", err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+
+		pc, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			_ = ln.Close()
+			continue
+		}
+
+		if err := pc.Close(); err != nil {
+			t.Fatalf("close reserved udp port: %v", err)
+		}
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close reserved tcp port: %v", err)
+		}
+
+		return fmt.Sprintf("127.0.0.1:%d", port)
+	}
+
+	t.Fatal("failed to reserve matching tcp/udp listen port")
+	return ""
+}
+
+func pickFreeTCPAddr(t *testing.T) string {
+	t.Helper()
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve tcp port: %v", err)
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
+	addr := ln.Addr().String()
 	if err := ln.Close(); err != nil {
 		t.Fatalf("close reserved tcp port: %v", err)
 	}
-
-	pc, err := net.ListenPacket("udp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		t.Fatalf("reserve udp port %d: %v", port, err)
-	}
-	if err := pc.Close(); err != nil {
-		t.Fatalf("close reserved udp port: %v", err)
-	}
-
-	return fmt.Sprintf("127.0.0.1:%d", port)
+	return addr
 }
 
-func writeConfig(t *testing.T, path, listenAddr, upstreamAddr string) {
+func writeConfig(t *testing.T, path, listenAddr, httpsListenAddr, upstreamAddr string) {
 	t.Helper()
 
 	raw := fmt.Sprintf(`mode: audit
@@ -204,7 +237,11 @@ policy:
   default: deny
   allow:
     - github.com
-`, listenAddr, upstreamAddr)
+https:
+  listen: %s
+  ports:
+    - 443
+`, listenAddr, upstreamAddr, httpsListenAddr)
 
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)

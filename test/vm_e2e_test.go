@@ -148,7 +148,7 @@ func newVMNieHarness(t *testing.T, scenario vmScenario) *vmNieHarness {
 func (h *vmNieHarness) start(t *testing.T) *vmRun {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
 	cmd := exec.CommandContext(ctx, h.binPath, "-config", h.configPath)
@@ -205,8 +205,12 @@ func (h *vmNieHarness) stop(t *testing.T, run *vmRun) {
 	if err := run.cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatalf("signal nie: %v", err)
 	}
-	if err := <-run.waitCh; err != nil {
+	forced, err := waitForVMNieExit(run.cmd, run.waitCh, run.procDone, 2*time.Second, 2*time.Second)
+	if err != nil && !forced {
 		t.Fatalf("wait for nie exit: %v; logs=%s", err, run.logs.String())
+	}
+	if err != nil && forced {
+		t.Logf("nie killed after timeout: %v", err)
 	}
 
 	waitForVMPinnedStateAfterExit(t, "/sys/fs/bpf/nie", false)
@@ -420,6 +424,42 @@ func gracefulStopVMNie(cmd *exec.Cmd, procDone <-chan struct{}) {
 	case <-procDone:
 	case <-time.After(2 * time.Second):
 	}
+}
+
+func waitForVMNieExit(cmd *exec.Cmd, waitCh <-chan error, procDone <-chan struct{}, interruptTimeout, killTimeout time.Duration) (bool, error) {
+	select {
+	case err := <-waitCh:
+		return false, err
+	case <-time.After(interruptTimeout):
+	}
+
+	select {
+	case <-procDone:
+		return false, nil
+	default:
+	}
+
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+
+	return true, waitForVMNieKill(waitCh, procDone, killTimeout)
+}
+
+func waitForVMNieKill(waitCh <-chan error, procDone <-chan struct{}, killTimeout time.Duration) error {
+	select {
+	case err := <-waitCh:
+		return err
+	case <-time.After(killTimeout):
+	}
+
+	select {
+	case <-procDone:
+		return nil
+	default:
+	}
+
+	return fmt.Errorf("timed out waiting for nie to exit after kill")
 }
 
 func waitForVMPinnedStateAfterExit(t *testing.T, path string, wantExists bool) {

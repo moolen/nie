@@ -128,6 +128,38 @@ func TestServeDNS_LearnsConfiguredPortsForMITMHost(t *testing.T) {
 	}
 }
 
+func TestServeDNS_DoesNotLearnWhenTrustPlanHasNoMatch(t *testing.T) {
+	var learned []ebpf.TrustEntry
+	srv := New(ServerConfig{
+		Mode:      config.ModeEnforce,
+		Policy:    allowOnly("*.github.com"),
+		TrustPlan: trustPlanForTests(map[string][]uint16{}),
+		Upstream:  fakeUpstreamAnswer("api.github.com.", "203.0.113.10", 60),
+		Trust:     captureTrustEntries(&learned),
+	})
+
+	_ = exchangeLocal(t, srv, question("api.github.com."))
+	if len(learned) != 0 {
+		t.Fatalf("learned = %v, want no entries", learned)
+	}
+}
+
+func TestServeDNS_DoesNotLearnWhenTrustPlanReturnsEmptyPorts(t *testing.T) {
+	var learned []ebpf.TrustEntry
+	srv := New(ServerConfig{
+		Mode:      config.ModeEnforce,
+		Policy:    allowOnly("*.github.com"),
+		TrustPlan: trustPlanForTests(map[string][]uint16{"api.github.com": {}}),
+		Upstream:  fakeUpstreamAnswer("api.github.com.", "203.0.113.10", 60),
+		Trust:     captureTrustEntries(&learned),
+	})
+
+	_ = exchangeLocal(t, srv, question("api.github.com."))
+	if len(learned) != 0 {
+		t.Fatalf("learned = %v, want no entries", learned)
+	}
+}
+
 func TestServeDNS_NormalizesSingleQuestionHostnameBeforePolicyEvaluation(t *testing.T) {
 	var seen string
 	srv := New(ServerConfig{
@@ -265,6 +297,21 @@ func TestNew_NilPolicyDefaultsToDenyAllAndLogsWarning(t *testing.T) {
 	}
 	if !bytes.Contains(buf.Bytes(), []byte("missing_dns_policy_default_deny")) {
 		t.Fatalf("log output %q does not contain missing_dns_policy_default_deny", buf.String())
+	}
+}
+
+func TestNew_NilTrustPlanDefaultsToNoop(t *testing.T) {
+	srv := New(ServerConfig{
+		Mode:   config.ModeAudit,
+		Policy: allowOnly("*.github.com"),
+		Upstream: fakeUpstream(func(q string) *dns.Msg {
+			return replyWithRecords(question(q))
+		}),
+		Trust: noopTrustWriter{},
+	})
+
+	if srv.trustPlan == nil {
+		t.Fatal("trustPlan = nil, want no-op trust plan")
 	}
 }
 

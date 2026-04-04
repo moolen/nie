@@ -11,6 +11,8 @@
 
 #include "common.h"
 
+#define IPV4_FRAG_OFFSET_MASK 0x1fff
+
 /* Sentinel default: do not bypass anything until userspace config sets this. */
 const volatile __u32 cfg_bypass_mark = 0xffffffff;
 const volatile __u32 cfg_mode = NIE_MODE_ENFORCE;
@@ -49,6 +51,12 @@ static __always_inline int parse_ipv4_dport(struct __sk_buff *skb, struct iphdr 
 		return -1;
 	if ((void *)ip + (ip->ihl * 4) > data_end)
 		return -1;
+
+	/* Non-initial fragments don't carry transport headers reliably. */
+	if (bpf_ntohs(ip->frag_off) & IPV4_FRAG_OFFSET_MASK) {
+		*out_ip = ip;
+		return 0;
+	}
 
 	*out_dport = 0;
 	if (ip->protocol == IPPROTO_TCP) {

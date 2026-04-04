@@ -51,6 +51,10 @@ type denyAllPolicy struct{}
 
 func (denyAllPolicy) Allows(string) bool { return false }
 
+type noopTrustPlanImpl struct{}
+
+func (noopTrustPlanImpl) PortsForHost(string) ([]uint16, bool) { return nil, false }
+
 func New(cfg ServerConfig) *Server {
 	l := cfg.Logger
 	if l == nil {
@@ -72,11 +76,15 @@ func New(cfg ServerConfig) *Server {
 		p = denyAllPolicy{}
 		l.Warn("missing_dns_policy_default_deny")
 	}
+	tp := cfg.TrustPlan
+	if tp == nil {
+		tp = noopTrustPlanImpl{}
+	}
 
 	return &Server{
 		mode:      cfg.Mode,
 		policy:    p,
-		trustPlan: cfg.TrustPlan,
+		trustPlan: tp,
 		upstream:  cfg.Upstream,
 		trust:     tw,
 		maxTTL:    maxTTL,
@@ -137,7 +145,7 @@ func (s *Server) exchangeUpstream(req *dns.Msg) *dns.Msg {
 }
 
 func (s *Server) learnARecords(host string, resp *dns.Msg) {
-	if resp == nil || s.trust == nil || s.trustPlan == nil {
+	if resp == nil || s.trust == nil {
 		return
 	}
 

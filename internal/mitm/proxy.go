@@ -2,6 +2,7 @@ package mitm
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -11,7 +12,11 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/moolen/nie/internal/config"
 	"github.com/moolen/nie/internal/httppolicy"
@@ -19,20 +24,32 @@ import (
 )
 
 var ErrHTTPSRequestDenied = errors.New("https request denied by policy")
+var ErrHTTPSRequestHeadersTooLarge = errors.New("https request headers exceed configured limit")
+
+const (
+	defaultProxyIdleTimeout    = 30 * time.Second
+	defaultProxyMaxHeaderBytes = 1 << 20
+)
 
 type ProxyConfig struct {
 	Mode             config.Mode
 	MissingSNIAction httppolicy.Action
 	DefaultAction    httppolicy.Action
+	IdleTimeout      time.Duration
+	MaxHeaderBytes   int
 }
 
 type ProxyDependencies struct {
-	Logger           *slog.Logger
-	MITMPolicy       interface{ Evaluate(httppolicy.Request) (httppolicy.Decision, bool) }
+	Logger     *slog.Logger
+	MITMPolicy interface {
+		Evaluate(httppolicy.Request) (httppolicy.Decision, bool)
+	}
 	HostnamePolicy   interface{ Allows(string) bool }
-	LeafCertificates interface{ CertificateForHost(string) (*tls.Certificate, error) }
-	OpenUpstreamTLS  func(context.Context, string, netip.AddrPort) (net.Conn, error)
-	OpenUpstreamTCP  func(context.Context, netip.AddrPort) (net.Conn, error)
+	LeafCertificates interface {
+		CertificateForHost(string) (*tls.Certificate, error)
+	}
+	OpenUpstreamTLS func(context.Context, string, netip.AddrPort) (net.Conn, error)
+	OpenUpstreamTCP func(context.Context, netip.AddrPort) (net.Conn, error)
 }
 
 type Proxy struct {
@@ -40,11 +57,17 @@ type Proxy struct {
 	missingSNIAction httppolicy.Action
 	defaultAction    httppolicy.Action
 	logger           *slog.Logger
-	mitmPolicy       interface{ Evaluate(httppolicy.Request) (httppolicy.Decision, bool) }
+	mitmPolicy       interface {
+		Evaluate(httppolicy.Request) (httppolicy.Decision, bool)
+	}
 	hostnamePolicy   interface{ Allows(string) bool }
-	leafCertificates interface{ CertificateForHost(string) (*tls.Certificate, error) }
-	openUpstreamTLS  func(context.Context, string, netip.AddrPort) (net.Conn, error)
-	openUpstreamTCP  func(context.Context, netip.AddrPort) (net.Conn, error)
+	leafCertificates interface {
+		CertificateForHost(string) (*tls.Certificate, error)
+	}
+	openUpstreamTLS func(context.Context, string, netip.AddrPort) (net.Conn, error)
+	openUpstreamTCP func(context.Context, netip.AddrPort) (net.Conn, error)
+	idleTimeout     time.Duration
+	maxHeaderBytes  int
 }
 
 type denyAllHostnamePolicy struct{}
@@ -73,6 +96,15 @@ func NewProxy(cfg ProxyConfig, deps ProxyDependencies) (*Proxy, error) {
 		return nil, fmt.Errorf("invalid default action %q", cfg.DefaultAction)
 	}
 
+	idleTimeout := cfg.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = defaultProxyIdleTimeout
+	}
+	maxHeaderBytes := cfg.MaxHeaderBytes
+	if maxHeaderBytes <= 0 {
+		maxHeaderBytes = defaultProxyMaxHeaderBytes
+	}
+
 	logger := deps.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -92,6 +124,8 @@ func NewProxy(cfg ProxyConfig, deps ProxyDependencies) (*Proxy, error) {
 		leafCertificates: deps.LeafCertificates,
 		openUpstreamTLS:  deps.OpenUpstreamTLS,
 		openUpstreamTCP:  deps.OpenUpstreamTCP,
+		idleTimeout:      idleTimeout,
+		maxHeaderBytes:   maxHeaderBytes,
 	}, nil
 }
 
@@ -111,21 +145,38 @@ func (p *Proxy) HandleClassifiedConnection(ctx context.Context, classified Class
 		return fmt.Errorf("issue leaf certificate for %q: %w", host, err)
 	}
 
-	downstream := tls.Server(classified.Conn, &tls.Config{
+	downstreamTLS := tls.Server(withIdleTimeout(classified.Conn, p.idleTimeout), &tls.Config{
 		Certificates: []tls.Certificate{*leaf},
 		MinVersion:   tls.VersionTLS12,
 	})
-	defer downstream.Close()
+	defer downstreamTLS.Close()
 
-	if err := downstream.HandshakeContext(ctx); err != nil {
+	if err := downstreamTLS.HandshakeContext(ctx); err != nil {
 		return fmt.Errorf("complete downstream tls handshake for %q: %w", host, err)
 	}
+	downstream := withIdleTimeout(downstreamTLS, p.idleTimeout)
 
-	reader := bufio.NewReader(downstream)
+	reader := bufio.NewReaderSize(downstream, p.readerBufferSize())
+	var (
+		upstream       net.Conn
+		upstreamReader *bufio.Reader
+	)
+	defer func() {
+		if upstream != nil {
+			_ = upstream.Close()
+		}
+	}()
+
 	for {
+		if err := ensureHeaderLimit(reader, p.maxHeaderBytes); err != nil {
+			if isBenignReadTermination(err) {
+				return nil
+			}
+			return fmt.Errorf("read downstream http request for %q: %w", host, err)
+		}
 		req, err := http.ReadRequest(reader)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			if isBenignReadTermination(err) {
 				return nil
 			}
 			return fmt.Errorf("read downstream http request for %q: %w", host, err)
@@ -139,35 +190,51 @@ func (p *Proxy) HandleClassifiedConnection(ctx context.Context, classified Class
 		if shouldLogAction(action, p.mode) {
 			p.logWouldDeny(classified.OriginalDestination.Port(), host, req.Method, requestPath(req), action, matchedMITM)
 		}
+		closeAfterRequest := requestWantsClose(req)
 
-		upstream, err := p.openUpstreamTLS(ctx, host, classified.OriginalDestination)
-		if err != nil {
-			_ = req.Body.Close()
-			return fmt.Errorf("open upstream tls connection for %q: %w", host, err)
+		if upstream == nil {
+			upstream, err = p.openUpstreamTLS(ctx, host, classified.OriginalDestination)
+			if err != nil {
+				_ = req.Body.Close()
+				return fmt.Errorf("open upstream tls connection for %q: %w", host, err)
+			}
+			upstream = withIdleTimeout(upstream, p.idleTimeout)
+			upstreamReader = bufio.NewReaderSize(upstream, p.readerBufferSize())
 		}
 
 		if err := req.Write(upstream); err != nil {
 			_ = req.Body.Close()
 			_ = upstream.Close()
+			upstream = nil
+			upstreamReader = nil
 			return fmt.Errorf("forward upstream http request for %q: %w", host, err)
 		}
 		_ = req.Body.Close()
 
-		resp, err := http.ReadResponse(bufio.NewReader(upstream), req)
+		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
 			_ = upstream.Close()
+			upstream = nil
+			upstreamReader = nil
 			return fmt.Errorf("read upstream http response for %q: %w", host, err)
 		}
 
 		if err := resp.Write(downstream); err != nil {
 			_ = resp.Body.Close()
 			_ = upstream.Close()
+			upstream = nil
+			upstreamReader = nil
 			return fmt.Errorf("forward downstream http response for %q: %w", host, err)
 		}
 
+		closeUpstream := responseWantsClose(resp)
 		_ = resp.Body.Close()
-		_ = upstream.Close()
-		if requestWantsClose(req) {
+		if closeUpstream {
+			_ = upstream.Close()
+			upstream = nil
+			upstreamReader = nil
+		}
+		if closeAfterRequest {
 			return nil
 		}
 	}
@@ -192,6 +259,11 @@ func (p *Proxy) tunnelOpaqueTCP(ctx context.Context, downstream net.Conn, destin
 		return fmt.Errorf("open upstream tcp connection: %w", err)
 	}
 	defer upstream.Close()
+
+	downstream = withIdleTimeout(downstream, p.idleTimeout)
+	upstream = withIdleTimeout(upstream, p.idleTimeout)
+	stopCancel := closeOnContextDone(ctx, downstream, upstream)
+	defer stopCancel()
 
 	copyErr := make(chan error, 2)
 	go proxyStream(copyErr, upstream, downstream)
@@ -247,6 +319,13 @@ func requestWantsClose(req *http.Request) bool {
 	return req.Close || strings.EqualFold(req.Header.Get("Connection"), "close")
 }
 
+func responseWantsClose(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	return resp.Close || strings.EqualFold(resp.Header.Get("Connection"), "close")
+}
+
 func shouldLogAction(action httppolicy.Action, mode config.Mode) bool {
 	return action == httppolicy.ActionAudit || (action == httppolicy.ActionDeny && mode == config.ModeAudit)
 }
@@ -275,4 +354,167 @@ func (p *Proxy) logWouldDeny(port uint16, host, method, path string, action http
 		"path", path,
 		"action", string(action),
 	)
+}
+
+func (p *Proxy) readerBufferSize() int {
+	return p.maxHeaderBytes + 1
+}
+
+func ensureHeaderLimit(reader *bufio.Reader, limit int) error {
+	if limit <= 0 {
+		return nil
+	}
+
+	for {
+		if buffered := reader.Buffered(); buffered > 0 {
+			buf, err := reader.Peek(buffered)
+			if err == nil {
+				if headerTerminatorIndex(buf) >= 0 {
+					return nil
+				}
+				if len(buf) > limit {
+					return ErrHTTPSRequestHeadersTooLarge
+				}
+			}
+		}
+
+		need := reader.Buffered() + 1
+		if need < 1 {
+			need = 1
+		}
+		if need > limit+1 {
+			need = limit + 1
+		}
+
+		buf, err := reader.Peek(need)
+		if headerTerminatorIndex(buf) >= 0 {
+			return nil
+		}
+		if len(buf) > limit || errors.Is(err, bufio.ErrBufferFull) {
+			return ErrHTTPSRequestHeadersTooLarge
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func headerTerminatorIndex(buf []byte) int {
+	if i := bytes.Index(buf, []byte("\r\n\r\n")); i >= 0 {
+		return i
+	}
+	return bytes.Index(buf, []byte("\n\n"))
+}
+
+func isBenignReadTermination(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)
+}
+
+type idleTimeoutConn struct {
+	net.Conn
+	timeout   time.Duration
+	activity  chan struct{}
+	done      chan struct{}
+	timedOut  atomic.Bool
+	closeOnce sync.Once
+}
+
+func withIdleTimeout(conn net.Conn, timeout time.Duration) net.Conn {
+	if conn == nil || timeout <= 0 {
+		return conn
+	}
+	c := &idleTimeoutConn{
+		Conn:     conn,
+		timeout:  timeout,
+		activity: make(chan struct{}, 1),
+		done:     make(chan struct{}),
+	}
+	go c.watchIdle()
+	c.touch()
+	return c
+}
+
+func (c *idleTimeoutConn) Read(p []byte) (int, error) {
+	c.touch()
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.touch()
+	}
+	if err != nil && c.timedOut.Load() {
+		return n, os.ErrDeadlineExceeded
+	}
+	return n, err
+}
+
+func (c *idleTimeoutConn) Write(p []byte) (int, error) {
+	c.touch()
+	n, err := c.Conn.Write(p)
+	if n > 0 {
+		c.touch()
+	}
+	if err != nil && c.timedOut.Load() {
+		return n, os.ErrDeadlineExceeded
+	}
+	return n, err
+}
+
+func (c *idleTimeoutConn) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.done)
+	})
+	return c.Conn.Close()
+}
+
+func (c *idleTimeoutConn) touch() {
+	select {
+	case c.activity <- struct{}{}:
+	default:
+	}
+}
+
+func (c *idleTimeoutConn) watchIdle() {
+	timer := time.NewTimer(c.timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-timer.C:
+			c.timedOut.Store(true)
+			_ = c.Conn.Close()
+			return
+		case <-c.activity:
+			c.timedOut.Store(false)
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(c.timeout)
+		case <-c.done:
+			return
+		}
+	}
+}
+
+func closeOnContextDone(ctx context.Context, conns ...net.Conn) func() {
+	if ctx == nil || ctx.Done() == nil {
+		return func() {}
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			for _, conn := range conns {
+				if conn != nil {
+					_ = conn.Close()
+				}
+			}
+		case <-stopped:
+		}
+	}()
+	return func() {
+		close(stopped)
+	}
 }

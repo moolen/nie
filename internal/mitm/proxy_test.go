@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -340,6 +341,168 @@ func TestProxy_HandlesMultipleRequestsOnOneConnection(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("HandleClassifiedConnection() error = %v", err)
 	}
+	if proxy.upstreamDialCount() != 1 {
+		t.Fatalf("upstream dial count = %d, want 1", proxy.upstreamDialCount())
+	}
+}
+
+func TestProxy_TimesOutStalledDownstreamConnection(t *testing.T) {
+	logger, _ := testLogger()
+	proxy := newTestProxy(t, testProxyOptions{
+		logger:      logger,
+		idleTimeout: 25 * time.Millisecond,
+		mitmRules: []httppolicy.Rule{
+			{
+				Host:    "api.github.com",
+				Port:    443,
+				Methods: []string{"GET"},
+				Paths:   []string{"/"},
+				Action:  httppolicy.ActionAllow,
+			},
+		},
+	})
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- proxy.HandleClassifiedConnection(context.Background(), ClassifiedConn{
+			Conn:                serverConn,
+			OriginalDestination: netip.MustParseAddrPort("203.0.113.10:443"),
+			ClientHello:         ClientHello{ServerName: "api.github.com"},
+		})
+	}()
+
+	clientTLS := tls.Client(clientConn, &tls.Config{
+		ServerName: "api.github.com",
+		RootCAs:    proxy.testRootCAs(),
+		MinVersion: tls.VersionTLS12,
+	})
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatalf("clientTLS.Handshake() error = %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("HandleClassifiedConnection() error = nil, want timeout")
+		}
+		if !strings.Contains(err.Error(), "timeout") && !strings.Contains(err.Error(), "deadline") {
+			t.Fatalf("HandleClassifiedConnection() error = %v, want timeout context", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for proxy timeout")
+	}
+}
+
+func TestProxy_DeniesRequestHeadersAboveLimit(t *testing.T) {
+	logger, _ := testLogger()
+	proxy := newTestProxy(t, testProxyOptions{
+		logger:         logger,
+		maxHeaderBytes: 128,
+		mitmRules: []httppolicy.Rule{
+			{
+				Host:    "api.github.com",
+				Port:    443,
+				Methods: []string{"GET"},
+				Paths:   []string{"/"},
+				Action:  httppolicy.ActionAllow,
+			},
+		},
+	})
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- proxy.HandleClassifiedConnection(context.Background(), ClassifiedConn{
+			Conn:                serverConn,
+			OriginalDestination: netip.MustParseAddrPort("203.0.113.10:443"),
+			ClientHello:         ClientHello{ServerName: "api.github.com"},
+		})
+	}()
+
+	clientTLS := tls.Client(clientConn, &tls.Config{
+		ServerName: "api.github.com",
+		RootCAs:    proxy.testRootCAs(),
+		MinVersion: tls.VersionTLS12,
+	})
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatalf("clientTLS.Handshake() error = %v", err)
+	}
+
+	oversizedValue := strings.Repeat("a", 256)
+	reqText := "GET / HTTP/1.1\r\nHost: api.github.com\r\nX-Large: " + oversizedValue + "\r\n\r\n"
+	if _, err := io.WriteString(clientTLS, reqText); err != nil {
+		t.Fatalf("write oversized request: %v", err)
+	}
+	_ = clientConn.Close()
+
+	err := <-done
+	if !errors.Is(err, ErrHTTPSRequestHeadersTooLarge) {
+		t.Fatalf("HandleClassifiedConnection() error = %v, want %v", err, ErrHTTPSRequestHeadersTooLarge)
+	}
+	if proxy.upstreamDialCount() != 0 {
+		t.Fatalf("upstream dial count = %d, want 0", proxy.upstreamDialCount())
+	}
+}
+
+func TestProxy_HandlesConcurrentHTTPSConnections(t *testing.T) {
+	logger, _ := testLogger()
+	proxy := newTestProxy(t, testProxyOptions{
+		logger: logger,
+		mitmRules: []httppolicy.Rule{
+			{
+				Host:    "api.github.com",
+				Port:    443,
+				Methods: []string{"GET"},
+				Paths:   []string{"/**"},
+				Action:  httppolicy.ActionAllow,
+			},
+		},
+		upstreamResponseBody: "parallel",
+	})
+
+	const flows = 8
+	errCh := make(chan error, flows)
+	var wg sync.WaitGroup
+	for i := 0; i < flows; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			path := fmt.Sprintf("/req-%d", i)
+			statusCode, body, _, err := roundTripHTTPSRequest(t, proxy, roundTripConfig{
+				serverName: "api.github.com",
+				hostHeader: "api.github.com",
+				method:     http.MethodGet,
+				path:       path,
+			})
+			if err != nil {
+				errCh <- fmt.Errorf("flow %d: %w", i, err)
+				return
+			}
+			if statusCode != http.StatusOK {
+				errCh <- fmt.Errorf("flow %d: status=%d", i, statusCode)
+				return
+			}
+			if body != "parallel" {
+				errCh <- fmt.Errorf("flow %d: body=%q", i, body)
+				return
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if proxy.upstreamDialCount() != flows {
+		t.Fatalf("upstream dial count = %d, want %d", proxy.upstreamDialCount(), flows)
+	}
 }
 
 func TestProxy_DeniesInvalidHTTPAfterTLSHandshake(t *testing.T) {
@@ -441,6 +604,8 @@ type testProxyOptions struct {
 	mode                 config.Mode
 	missingSNIAction     httppolicy.Action
 	defaultAction        httppolicy.Action
+	idleTimeout          time.Duration
+	maxHeaderBytes       int
 	fallbackAllow        []string
 	mitmRules            []httppolicy.Rule
 	upstreamResponseBody string
@@ -502,19 +667,21 @@ func newTestProxy(t *testing.T, opts testProxyOptions) *testProxy {
 		Mode:             opts.mode,
 		MissingSNIAction: opts.missingSNIAction,
 		DefaultAction:    opts.defaultAction,
-		}, ProxyDependencies{
-			Logger:           opts.logger,
-			MITMPolicy:       httpPolicy,
-			HostnamePolicy:   fallbackPolicy,
-			LeafCertificates: leafCache,
-			OpenUpstreamTLS:  upstream.dialTLS,
-			OpenUpstreamTCP: func(ctx context.Context, destination netip.AddrPort) (net.Conn, error) {
-				if !opts.enableRawTCPUpstream {
-					return nil, errors.New("raw upstream disabled in test")
-				}
-				return upstream.dialRaw(ctx, destination)
-			},
-		})
+		IdleTimeout:      opts.idleTimeout,
+		MaxHeaderBytes:   opts.maxHeaderBytes,
+	}, ProxyDependencies{
+		Logger:           opts.logger,
+		MITMPolicy:       httpPolicy,
+		HostnamePolicy:   fallbackPolicy,
+		LeafCertificates: leafCache,
+		OpenUpstreamTLS:  upstream.dialTLS,
+		OpenUpstreamTCP: func(ctx context.Context, destination netip.AddrPort) (net.Conn, error) {
+			if !opts.enableRawTCPUpstream {
+				return nil, errors.New("raw upstream disabled in test")
+			}
+			return upstream.dialRaw(ctx, destination)
+		},
+	})
 	if err != nil {
 		t.Fatalf("NewProxy() error = %v", err)
 	}
@@ -534,6 +701,10 @@ func (p *testProxy) testRootCAs() *x509.CertPool {
 
 func (p *testProxy) upstreamRequestCount() int {
 	return len(p.upstream.requests)
+}
+
+func (p *testProxy) upstreamDialCount() int {
+	return p.upstream.dialCount()
 }
 
 func roundTripHTTPSRequest(t *testing.T, proxy *testProxy, cfg roundTripConfig) (int, string, *http.Request, error) {
@@ -600,35 +771,53 @@ type recordingUpstream struct {
 	err          error
 	requests     chan *http.Request
 	rawReply     string
+
+	mu        sync.Mutex
+	dialCalls int
 }
 
 func (u *recordingUpstream) dialTLS(context.Context, string, netip.AddrPort) (net.Conn, error) {
 	if u.err != nil {
 		return nil, u.err
 	}
+	u.mu.Lock()
+	u.dialCalls++
+	u.mu.Unlock()
 
 	clientConn, serverConn := net.Pipe()
 	go func() {
 		defer serverConn.Close()
+		reader := bufio.NewReader(serverConn)
 
-		req, err := http.ReadRequest(bufio.NewReader(serverConn))
-		if err != nil {
-			return
-		}
-		u.requests <- req
+		for {
+			req, err := http.ReadRequest(reader)
+			if err != nil {
+				return
+			}
+			u.requests <- req
 
 			resp := &http.Response{
-				StatusCode: http.StatusOK,
-				Status:     "200 OK",
-				ProtoMajor: 1,
-				ProtoMinor: 1,
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				ProtoMajor:    1,
+				ProtoMinor:    1,
 				ContentLength: int64(len(u.responseBody)),
 				Header: http.Header{
 					"Content-Length": []string{fmt.Sprintf("%d", len(u.responseBody))},
 				},
 				Body: io.NopCloser(strings.NewReader(u.responseBody)),
 			}
-		_ = resp.Write(serverConn)
+			if requestWantsClose(req) {
+				resp.Close = true
+				resp.Header.Set("Connection", "close")
+			}
+			if err := resp.Write(serverConn); err != nil {
+				return
+			}
+			if requestWantsClose(req) {
+				return
+			}
+		}
 	}()
 	return clientConn, nil
 }
@@ -644,6 +833,12 @@ func (u *recordingUpstream) dialRaw(context.Context, netip.AddrPort) (net.Conn, 
 		}
 	}()
 	return clientConn, nil
+}
+
+func (u *recordingUpstream) dialCount() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.dialCalls
 }
 
 func newProxyTestAuthority(t *testing.T) *Authority {

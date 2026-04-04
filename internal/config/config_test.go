@@ -64,6 +64,22 @@ https:
 	}
 }
 
+func baseConfigWithHTTPS(httpsBlock string) []byte {
+	return []byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+` + httpsBlock + `
+`)
+}
+
 func TestLoadConfig_RejectsMissingHTTPSBlock(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
@@ -102,6 +118,146 @@ https: {}
 	}
 	if !strings.Contains(err.Error(), "https.ports") {
 		t.Fatalf("Load() error = %v, want https.ports validation", err)
+	}
+}
+
+func TestLoadConfig_RejectsInvalidHTTPSListen(t *testing.T) {
+	_, err := Load(baseConfigWithHTTPS(`
+  listen: 127.0.0.1
+  ports: [443]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "https.listen") {
+		t.Fatalf("Load() error = %v, want https.listen context", err)
+	}
+}
+
+func TestLoadConfig_RejectsDuplicateHTTPSPorts(t *testing.T) {
+	_, err := Load(baseConfigWithHTTPS(`
+  ports: [443, 443]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "duplicates port") {
+		t.Fatalf("Load() error = %v, want duplicate-port reason", err)
+	}
+}
+
+func TestLoadConfig_RejectsOutOfRangeHTTPSPorts(t *testing.T) {
+	_, err := Load(baseConfigWithHTTPS(`
+  ports: [0]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "1-65535") {
+		t.Fatalf("Load() error = %v, want out-of-range reason", err)
+	}
+}
+
+func TestLoadConfig_RejectsInvalidHTTPSSNIMissing(t *testing.T) {
+	_, err := Load(baseConfigWithHTTPS(`
+  ports: [443]
+  sni:
+    missing: allow
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "https.sni.missing") {
+		t.Fatalf("Load() error = %v, want https.sni.missing context", err)
+	}
+}
+
+func TestLoadConfig_RejectsInvalidHTTPSMITMDefault(t *testing.T) {
+	_, err := Load(baseConfigWithHTTPS(`
+  ports: [443]
+  mitm:
+    default: allow
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "https.mitm.default") {
+		t.Fatalf("Load() error = %v, want https.mitm.default context", err)
+	}
+}
+
+func TestLoadConfig_RejectsInvalidHTTPSMITMRuleFields(t *testing.T) {
+	tests := []struct {
+		name        string
+		rule        string
+		wantContext string
+	}{
+		{
+			name: "empty host",
+			rule: `
+      - host: "   "
+        port: 443
+        methods: ["GET"]
+        paths: ["/"]
+        action: allow`,
+			wantContext: "https.mitm.rules[0].host",
+		},
+		{
+			name: "bad port",
+			rule: `
+      - host: api.github.com
+        port: 0
+        methods: ["GET"]
+        paths: ["/"]
+        action: allow`,
+			wantContext: "https.mitm.rules[0].port",
+		},
+		{
+			name: "empty methods",
+			rule: `
+      - host: api.github.com
+        port: 443
+        methods: []
+        paths: ["/"]
+        action: allow`,
+			wantContext: "https.mitm.rules[0].methods",
+		},
+		{
+			name: "empty paths",
+			rule: `
+      - host: api.github.com
+        port: 443
+        methods: ["GET"]
+        paths: []
+        action: allow`,
+			wantContext: "https.mitm.rules[0].paths",
+		},
+		{
+			name: "invalid action",
+			rule: `
+      - host: api.github.com
+        port: 443
+        methods: ["GET"]
+        paths: ["/"]
+        action: block`,
+			wantContext: "https.mitm.rules[0].action",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(baseConfigWithHTTPS(`
+  ports: [443]
+  mitm:
+    rules:` + tt.rule + `
+`))
+			if err == nil {
+				t.Fatal("Load() error = nil, want validation error")
+			}
+			if !strings.Contains(err.Error(), tt.wantContext) {
+				t.Fatalf("Load() error = %v, want %q context", err, tt.wantContext)
+			}
+		})
 	}
 }
 

@@ -11,8 +11,13 @@ type MITMHostPortRule struct {
 }
 
 type TrustPlan struct {
-	allow      *Engine
-	mitmByHost map[string][]uint16
+	allow *Engine
+	mitm  []mitmPatternPorts
+}
+
+type mitmPatternPorts struct {
+	engine *Engine
+	ports  []uint16
 }
 
 func NewTrustPlan(allowPatterns []string, mitm []MITMHostPortRule) (*TrustPlan, error) {
@@ -22,37 +27,52 @@ func NewTrustPlan(allowPatterns []string, mitm []MITMHostPortRule) (*TrustPlan, 
 	}
 
 	portsByHost := make(map[string]map[uint16]struct{}, len(mitm))
+	patternEngines := make(map[string]*Engine, len(mitm))
 	for i, rule := range mitm {
-		host := NormalizeHostname(rule.Host)
-		if host == "" {
+		pattern := NormalizeHostname(rule.Host)
+		if pattern == "" {
 			return nil, fmt.Errorf("mitm[%d].host must not be empty", i)
 		}
-		if !isValidHostname(host) {
-			return nil, fmt.Errorf("mitm[%d].host %q is not a valid hostname", i, rule.Host)
+		if _, exists := patternEngines[pattern]; !exists {
+			engine, err := New([]string{rule.Host})
+			if err != nil {
+				return nil, fmt.Errorf("mitm[%d].host %q is invalid: %w", i, rule.Host, err)
+			}
+			patternEngines[pattern] = engine
 		}
 		if rule.Port == 0 {
 			return nil, fmt.Errorf("mitm[%d].port must be a positive non-zero value", i)
 		}
 
-		if _, exists := portsByHost[host]; !exists {
-			portsByHost[host] = map[uint16]struct{}{}
+		if _, exists := portsByHost[pattern]; !exists {
+			portsByHost[pattern] = map[uint16]struct{}{}
 		}
-		portsByHost[host][rule.Port] = struct{}{}
+		portsByHost[pattern][rule.Port] = struct{}{}
 	}
 
-	compiled := make(map[string][]uint16, len(portsByHost))
-	for host, portsSet := range portsByHost {
+	patterns := make([]string, 0, len(portsByHost))
+	for pattern := range portsByHost {
+		patterns = append(patterns, pattern)
+	}
+	sort.Strings(patterns)
+
+	matching := make([]mitmPatternPorts, 0, len(portsByHost))
+	for _, pattern := range patterns {
+		portsSet := portsByHost[pattern]
 		ports := make([]uint16, 0, len(portsSet))
 		for port := range portsSet {
 			ports = append(ports, port)
 		}
 		sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
-		compiled[host] = ports
+		matching = append(matching, mitmPatternPorts{
+			engine: patternEngines[pattern],
+			ports:  ports,
+		})
 	}
 
 	return &TrustPlan{
-		allow:      allowEngine,
-		mitmByHost: compiled,
+		allow: allowEngine,
+		mitm:  matching,
 	}, nil
 }
 
@@ -65,12 +85,23 @@ func (p *TrustPlan) PortsForHost(host string) ([]uint16, bool) {
 	if p.allow.Allows(host) {
 		return []uint16{0}, true
 	}
-	ports, ok := p.mitmByHost[host]
-	if !ok {
+	portsSet := map[uint16]struct{}{}
+	for _, rule := range p.mitm {
+		if !rule.engine.Allows(host) {
+			continue
+		}
+		for _, port := range rule.ports {
+			portsSet[port] = struct{}{}
+		}
+	}
+	if len(portsSet) == 0 {
 		return nil, false
 	}
 
-	out := make([]uint16, len(ports))
-	copy(out, ports)
+	out := make([]uint16, 0, len(portsSet))
+	for port := range portsSet {
+		out = append(out, port)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out, true
 }

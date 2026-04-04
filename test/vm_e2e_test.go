@@ -166,6 +166,7 @@ func (h *vmNieHarness) start(t *testing.T) *vmRun {
 	procDone := make(chan struct{})
 	go func() {
 		waitCh <- cmd.Wait()
+		close(waitCh)
 		close(procDone)
 	}()
 
@@ -466,15 +467,17 @@ func waitForVMNieKill(waitCh <-chan error, procDone <-chan struct{}, killTimeout
 
 func readVMNieWaitResult(waitCh <-chan error, procDone <-chan struct{}) (error, bool) {
 	select {
-	case err := <-waitCh:
-		return err, true
-	case <-procDone:
-		select {
-		case err := <-waitCh:
+	case err, ok := <-waitCh:
+		if ok {
 			return err, true
-		case <-time.After(50 * time.Millisecond):
-			return nil, false
 		}
+		return nil, true
+	case <-procDone:
+		err, ok := <-waitCh
+		if ok {
+			return err, true
+		}
+		return nil, true
 	default:
 		return nil, false
 	}
@@ -493,6 +496,46 @@ func TestReadVMNieWaitResultPreservesWaitErrorAfterProcDone(t *testing.T) {
 	}
 	if err == nil || err.Error() != "boom" {
 		t.Fatalf("err = %v, want boom", err)
+	}
+}
+
+func TestReadVMNieWaitResultWaitsForDelayedSendAfterProcDone(t *testing.T) {
+	waitCh := make(chan error)
+	procDone := make(chan struct{})
+	done := make(chan struct{})
+
+	close(procDone)
+
+	var (
+		gotErr error
+		gotOK  bool
+	)
+	go func() {
+		gotErr, gotOK = readVMNieWaitResult(waitCh, procDone)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("read returned before wait result was available")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	go func() {
+		waitCh <- fmt.Errorf("delayed")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("read did not return after wait result was sent")
+	}
+
+	if !gotOK {
+		t.Fatal("ok = false, want true")
+	}
+	if gotErr == nil || gotErr.Error() != "delayed" {
+		t.Fatalf("err = %v, want delayed", gotErr)
 	}
 }
 

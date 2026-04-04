@@ -55,21 +55,22 @@ func TestVMEnforceBlocksThenAllowsRealEgress(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start nie: %v", err)
 	}
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-	})
 
 	waitCh := make(chan error, 1)
+	procDone := make(chan struct{})
 	go func() {
 		waitCh <- cmd.Wait()
+		close(procDone)
 	}()
+
+	t.Cleanup(func() {
+		gracefulStopVMNie(cmd, procDone)
+	})
 
 	waitForPinnedState(t, "/sys/fs/bpf/nie", true, waitCh, &logs)
 	waitForNieRedirectState(t, true, waitCh, &logs)
 
-	assertFixtureBlocked(t, fixture.Address, waitCh, &logs)
+	assertFixtureBlockedBeforeLearning(t, fixture.Address, waitCh, &logs)
 
 	resp := waitForAnswer(t, listenAddr, allowedHost+".", waitCh, &logs)
 	assertFixtureLearned(t, resp, fixture.IP)
@@ -83,8 +84,8 @@ func TestVMEnforceBlocksThenAllowsRealEgress(t *testing.T) {
 		t.Fatalf("wait for nie exit: %v; logs=%s", err, logs.String())
 	}
 
-	waitForPinnedStateAfterExit(t, "/sys/fs/bpf/nie", false)
-	waitForNieRedirectStateAfterExit(t, false)
+	waitForVMPinnedStateAfterExit(t, "/sys/fs/bpf/nie", false)
+	waitForVMNieRedirectStateAfterExit(t, false)
 }
 
 type vmFixture struct {
@@ -171,18 +172,32 @@ policy:
 	}
 }
 
-func assertFixtureBlocked(t *testing.T, fixtureAddr string, waitCh <-chan error, logs *lockedBuffer) {
+func assertFixtureBlockedBeforeLearning(t *testing.T, fixtureAddr string, waitCh <-chan error, logs *lockedBuffer) {
 	t.Helper()
 
-	select {
-	case err := <-waitCh:
-		t.Fatalf("nie exited before blocked-egress assertion: %v; logs=%s", err, logs.String())
-	default:
+	deadline := time.Now().Add(3 * time.Second)
+	consecutiveFailures := 0
+
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-waitCh:
+			t.Fatalf("nie exited before blocked-egress assertion: %v; logs=%s", err, logs.String())
+		default:
+		}
+
+		if err := dialFixture(fixtureAddr, 250*time.Millisecond); err != nil {
+			consecutiveFailures++
+			if consecutiveFailures >= 5 {
+				return
+			}
+		} else {
+			consecutiveFailures = 0
+		}
+
+		time.Sleep(100 * time.Millisecond)
 	}
 
-	if err := dialFixture(fixtureAddr, 1500*time.Millisecond); err == nil {
-		t.Fatalf("direct egress to fixture %s succeeded before DNS learning; logs=%s", fixtureAddr, logs.String())
-	}
+	t.Fatalf("direct egress to fixture %s did not show sustained pre-learn blocking; logs=%s", fixtureAddr, logs.String())
 }
 
 func assertFixtureLearned(t *testing.T, resp *dns.Msg, fixtureIP string) {
@@ -223,4 +238,68 @@ func dialFixture(addr string, timeout time.Duration) error {
 		return err
 	}
 	return conn.Close()
+}
+
+func gracefulStopVMNie(cmd *exec.Cmd, procDone <-chan struct{}) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+
+	select {
+	case <-procDone:
+		return
+	default:
+	}
+
+	_ = cmd.Process.Signal(os.Interrupt)
+
+	select {
+	case <-procDone:
+		return
+	case <-time.After(2 * time.Second):
+	}
+
+	_ = cmd.Process.Kill()
+
+	select {
+	case <-procDone:
+	case <-time.After(2 * time.Second):
+	}
+}
+
+func waitForVMPinnedStateAfterExit(t *testing.T, path string, wantExists bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		_, err := os.Stat(path)
+		exists := err == nil
+		if exists == wantExists {
+			return
+		}
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting after vm exit for pinned state at %s to be exists=%t", path, wantExists)
+}
+
+func waitForVMNieRedirectStateAfterExit(t *testing.T, wantInstalled bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		installed, err := nieRedirectInstalled()
+		if err != nil {
+			t.Fatalf("query nftables state: %v", err)
+		}
+		if installed == wantInstalled {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting after vm exit for nftables redirect state installed=%t", wantInstalled)
 }

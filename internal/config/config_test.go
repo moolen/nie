@@ -17,6 +17,8 @@ dns:
 policy:
   default: deny
   allow: ["*.github.com", "github.com"]
+https:
+  ports: [443]
 `)
 
 	cfg, err := Load(raw)
@@ -62,6 +64,47 @@ https:
 	}
 }
 
+func TestLoadConfig_RejectsMissingHTTPSBlock(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "https.ports") {
+		t.Fatalf("Load() error = %v, want https.ports validation", err)
+	}
+}
+
+func TestLoadConfig_RejectsEmptyHTTPSBlock(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https: {}
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "https.ports") {
+		t.Fatalf("Load() error = %v, want https.ports validation", err)
+	}
+}
+
 func TestLoadConfig_RejectsMissingInterface(t *testing.T) {
 	_, err := Load([]byte(`mode: enforce`))
 	if err == nil {
@@ -79,6 +122,8 @@ dns:
   mark: 4242
 policy:
   default: deny
+https:
+  ports: [443]
 `)
 
 	cfg, err := Load(raw)
@@ -158,6 +203,8 @@ dns:
 policy:
   default: deny
   allow: [" *.github.com ", " github.com "]
+https:
+  ports: [443]
 `)
 
 	cfg, err := Load(raw)
@@ -262,6 +309,8 @@ dns:
 policy:
   default: deny
   allow: ["github.com"]
+https:
+  ports: [443]
 `))
 	if err == nil {
 		t.Fatal("Load() error = nil, want validation error")
@@ -422,6 +471,8 @@ dns:
 policy:
   default: " deny "
   allow: ["github.com"]
+https:
+  ports: [443]
 `))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -496,6 +547,8 @@ dns:
 policy:
   default: deny
   allow: ["github.com"]
+https:
+  ports: [443]
 `))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -517,6 +570,8 @@ dns:
 policy:
   default: deny
   allow: ["github.com"]
+https:
+  ports: [443]
 `))
 	if err == nil {
 		t.Fatal("Load() error = nil, want duplicate key error")
@@ -640,6 +695,8 @@ dns:
 policy:
   default: deny
   allow: ["github.com"]
+https:
+  ports: [443]
 `))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -674,6 +731,8 @@ dns:
 policy:
   default: deny
   allow: ` + tt.allowValue + `
+https:
+  ports: [443]
 `))
 			if err != nil {
 				t.Fatalf("Load() error = %v", err)

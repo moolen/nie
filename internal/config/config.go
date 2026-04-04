@@ -97,8 +97,6 @@ func Load(raw []byte) (Config, error) {
 }
 
 func (c *Config) Validate() error {
-	httpsProvided := c.httpsConfigured()
-
 	c.Mode = Mode(strings.TrimSpace(string(c.Mode)))
 	c.Interface = strings.TrimSpace(c.Interface)
 	c.DNS.Listen = strings.TrimSpace(c.DNS.Listen)
@@ -173,9 +171,6 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid policy.default %q", c.Policy.Default)
 	}
 
-	if !httpsProvided {
-		return nil
-	}
 	if err := validateHostPort("https.listen", c.HTTPS.Listen); err != nil {
 		return err
 	}
@@ -242,19 +237,6 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
-}
-
-func (c Config) httpsConfigured() bool {
-	if c.HTTPS.Listen != "" || len(c.HTTPS.Ports) > 0 || c.HTTPS.SNI.Missing != "" {
-		return true
-	}
-	if c.HTTPS.CA.CertFile != "" || c.HTTPS.CA.KeyFile != "" {
-		return true
-	}
-	if c.HTTPS.MITM.Default != "" || len(c.HTTPS.MITM.Rules) > 0 {
-		return true
-	}
-	return false
 }
 
 func validateHostPort(field, value string) error {

@@ -1,5 +1,6 @@
 .worktrees/
 nie
+vm/vagrant/.vagrant/
 
 # Go build/test artifacts
 *.test

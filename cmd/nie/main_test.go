@@ -205,6 +205,30 @@ func TestMainStartFailsWhenRedirectManagerCreationFails(t *testing.T) {
 	}
 }
 
+func TestBuildRuntimeService_RequiresMarkedDialer(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := testConfig()
+	boom := errors.New("marked dialer unavailable")
+
+	_, _, err := buildRuntimeService(cfg, logger, componentBuilders{
+		newMarkedDialer: func(mark uint32) (*net.Dialer, error) {
+			if mark != uint32(cfg.DNS.Mark) {
+				t.Fatalf("newMarkedDialer() mark = %d, want %d", mark, cfg.DNS.Mark)
+			}
+			return nil, boom
+		},
+	})
+	if err == nil {
+		t.Fatalf("buildRuntimeService() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "marked dialer") {
+		t.Fatalf("buildRuntimeService() error = %q, want marked dialer context", err)
+	}
+	if !strings.Contains(err.Error(), boom.Error()) {
+		t.Fatalf("buildRuntimeService() error = %q, want wrapped %q", err, boom.Error())
+	}
+}
+
 func TestStartAuditEgressLoggerLogsAllowEvents(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
@@ -339,6 +363,29 @@ func testConfig() config.Config {
 		Policy: config.Policy{
 			Default: "deny",
 			Allow:   []string{"example.com"},
+		},
+		HTTPS: config.HTTPS{
+			Listen: "127.0.0.1:9443",
+			Ports:  []int{443},
+			SNI: config.HTTPSSNI{
+				Missing: "deny",
+			},
+			CA: config.HTTPSCA{
+				CertFile: "/tmp/nie-test-ca.crt",
+				KeyFile:  "/tmp/nie-test-ca.key",
+			},
+			MITM: config.HTTPSMITM{
+				Default: "deny",
+				Rules: []config.HTTPSMITMRule{
+					{
+						Host:    "example.com",
+						Port:    443,
+						Methods: []string{"GET"},
+						Paths:   []string{"/"},
+						Action:  "allow",
+					},
+				},
+			},
 		},
 	}
 }

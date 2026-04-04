@@ -35,12 +35,13 @@ func TestServiceStartOrdersDependencies(t *testing.T) {
 		Redirect: fakeLifecycle("redirect", &calls),
 		EBPF:     fakeLifecycle("ebpf", &calls),
 		DNS:      fakeLifecycle("dns", &calls),
+		HTTPS:    fakeLifecycle("https", &calls),
 	}
 
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if diff := cmp.Diff([]string{"ebpf:start", "redirect:start", "dns:start"}, calls); diff != "" {
+	if diff := cmp.Diff([]string{"ebpf:start", "dns:start", "https:start", "redirect:start"}, calls); diff != "" {
 		t.Fatalf("call order mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -51,12 +52,13 @@ func TestServiceStopOrdersDependencies(t *testing.T) {
 		Redirect: fakeLifecycle("redirect", &calls),
 		EBPF:     fakeLifecycle("ebpf", &calls),
 		DNS:      fakeLifecycle("dns", &calls),
+		HTTPS:    fakeLifecycle("https", &calls),
 	}
 
 	if err := svc.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}
-	if diff := cmp.Diff([]string{"dns:stop", "redirect:stop", "ebpf:stop"}, calls); diff != "" {
+	if diff := cmp.Diff([]string{"redirect:stop", "https:stop", "dns:stop", "ebpf:stop"}, calls); diff != "" {
 		t.Fatalf("call order mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -70,12 +72,13 @@ func TestServiceStopContinuesAfterError(t *testing.T) {
 		Redirect: fakeLifecycle("redirect", &calls),
 		EBPF:     fakeLifecycle("ebpf", &calls),
 		DNS:      dnsLC,
+		HTTPS:    fakeLifecycle("https", &calls),
 	}
 
 	if err := svc.Stop(context.Background()); err == nil {
 		t.Fatalf("Stop() error = nil, want non-nil")
 	}
-	if diff := cmp.Diff([]string{"dns:stop", "redirect:stop", "ebpf:stop"}, calls); diff != "" {
+	if diff := cmp.Diff([]string{"redirect:stop", "https:stop", "dns:stop", "ebpf:stop"}, calls); diff != "" {
 		t.Fatalf("call order mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -90,6 +93,7 @@ func TestServiceStartPropagatesError(t *testing.T) {
 			Redirect: fakeLifecycle("redirect", &calls),
 			EBPF:     ebpfLC,
 			DNS:      fakeLifecycle("dns", &calls),
+			HTTPS:    fakeLifecycle("https", &calls),
 		}
 
 		if err := svc.Start(context.Background()); err == nil {
@@ -109,12 +113,13 @@ func TestServiceStartPropagatesError(t *testing.T) {
 			Redirect: redirectLC,
 			EBPF:     fakeLifecycle("ebpf", &calls),
 			DNS:      fakeLifecycle("dns", &calls),
+			HTTPS:    fakeLifecycle("https", &calls),
 		}
 
 		if err := svc.Start(context.Background()); err == nil {
 			t.Fatalf("Start() error = nil, want non-nil")
 		}
-		if diff := cmp.Diff([]string{"ebpf:start", "redirect:start", "ebpf:stop"}, calls); diff != "" {
+		if diff := cmp.Diff([]string{"ebpf:start", "dns:start", "https:start", "redirect:start", "https:stop", "dns:stop", "ebpf:stop"}, calls); diff != "" {
 			t.Fatalf("call order mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -128,12 +133,33 @@ func TestServiceStartPropagatesError(t *testing.T) {
 			Redirect: fakeLifecycle("redirect", &calls),
 			EBPF:     fakeLifecycle("ebpf", &calls),
 			DNS:      dnsLC,
+			HTTPS:    fakeLifecycle("https", &calls),
 		}
 
 		if err := svc.Start(context.Background()); err == nil {
 			t.Fatalf("Start() error = nil, want non-nil")
 		}
-		if diff := cmp.Diff([]string{"ebpf:start", "redirect:start", "dns:start", "redirect:stop", "ebpf:stop"}, calls); diff != "" {
+		if diff := cmp.Diff([]string{"ebpf:start", "dns:start", "ebpf:stop"}, calls); diff != "" {
+			t.Fatalf("call order mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("https", func(t *testing.T) {
+		var calls []string
+		httpsLC := fakeLifecycle("https", &calls)
+		httpsLC.startErr = errors.New("boom")
+
+		svc := Service{
+			Redirect: fakeLifecycle("redirect", &calls),
+			EBPF:     fakeLifecycle("ebpf", &calls),
+			DNS:      fakeLifecycle("dns", &calls),
+			HTTPS:    httpsLC,
+		}
+
+		if err := svc.Start(context.Background()); err == nil {
+			t.Fatalf("Start() error = nil, want non-nil")
+		}
+		if diff := cmp.Diff([]string{"ebpf:start", "dns:start", "https:start", "dns:stop", "ebpf:stop"}, calls); diff != "" {
 			t.Fatalf("call order mismatch (-want +got):\n%s", diff)
 		}
 	})

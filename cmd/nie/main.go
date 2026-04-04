@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -17,6 +19,9 @@ import (
 	"github.com/moolen/nie/internal/config"
 	"github.com/moolen/nie/internal/dnsproxy"
 	"github.com/moolen/nie/internal/ebpf"
+	"github.com/moolen/nie/internal/httppolicy"
+	"github.com/moolen/nie/internal/mitm"
+	"github.com/moolen/nie/internal/netx"
 	"github.com/moolen/nie/internal/policy"
 	"github.com/moolen/nie/internal/redirect"
 	"github.com/moolen/nie/internal/runtime"
@@ -74,11 +79,12 @@ func (d *dnsListenerLifecycle) Stop(ctx context.Context) error {
 }
 
 type dnsClientUpstream struct {
-	addr string
+	addr   string
+	dialer *net.Dialer
 }
 
 func (u dnsClientUpstream) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
-	c := &dns.Client{}
+	c := &dns.Client{Dialer: u.dialer}
 	resp, _, err := c.ExchangeContext(ctx, req, u.addr)
 	return resp, err
 }
@@ -101,6 +107,7 @@ type componentBuilders struct {
 	newRedirectManager func(cfg config.Config) (runtime.Lifecycle, error)
 	newDNSProxy        func(cfg dnsProxyConfig) dns.Handler
 	newDNSLifecycle    func(addr string, handler dns.Handler) runtime.Lifecycle
+	newMarkedDialer    func(mark uint32) (*net.Dialer, error)
 }
 
 type liveTrustWriter struct {
@@ -204,10 +211,17 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("build policy: %w", err)
 	}
+	markedDialer, err := builders.newMarkedDialer(uint32(cfg.DNS.Mark))
+	if err != nil {
+		return runtime.Service{}, nil, fmt.Errorf("build marked dialer: %w", err)
+	}
 	if len(cfg.DNS.Upstreams) == 0 {
 		return runtime.Service{}, nil, fmt.Errorf("load config: dns.upstreams must contain at least one upstream")
 	}
-	upstream := dnsClientUpstream{addr: cfg.DNS.Upstreams[0]}
+	upstream := dnsClientUpstream{
+		addr:   cfg.DNS.Upstreams[0],
+		dialer: markedDialer,
+	}
 
 	ebpfMgr, err := builders.newEBPFManager(cfg)
 	if err != nil {
@@ -218,12 +232,69 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 		return runtime.Service{}, nil, fmt.Errorf("build redirect manager: %w", err)
 	}
 
+	trustPlan, err := policy.NewTrustPlan(cfg.Policy.Allow, mitmTrustRules(cfg.HTTPS.MITM.Rules))
+	if err != nil {
+		return runtime.Service{}, nil, fmt.Errorf("build dns trust plan: %w", err)
+	}
+	httpPolicy, err := httppolicy.New(mitmHTTPRules(cfg.HTTPS.MITM.Rules))
+	if err != nil {
+		return runtime.Service{}, nil, fmt.Errorf("build https mitm policy: %w", err)
+	}
+	authority, err := mitm.EnsureCA(mitm.CAPaths{
+		CertFile: cfg.HTTPS.CA.CertFile,
+		KeyFile:  cfg.HTTPS.CA.KeyFile,
+	})
+	if err != nil {
+		return runtime.Service{}, nil, fmt.Errorf("ensure https mitm ca: %w", err)
+	}
+	leafCache := mitm.NewLeafCache(authority, nil)
+	httpsProxy, err := mitm.NewProxy(mitm.ProxyConfig{
+		Mode:             cfg.Mode,
+		MissingSNIAction: httppolicy.Action(cfg.HTTPS.SNI.Missing),
+		DefaultAction:    httppolicy.Action(cfg.HTTPS.MITM.Default),
+	}, mitm.ProxyDependencies{
+		Logger:           logger,
+		MITMPolicy:       httpPolicy,
+		HostnamePolicy:   p,
+		LeafCertificates: leafCache,
+		OpenUpstreamTLS: func(ctx context.Context, serverName string, destination netip.AddrPort) (net.Conn, error) {
+			rawConn, err := markedDialer.DialContext(ctx, "tcp", destination.String())
+			if err != nil {
+				return nil, err
+			}
+			tlsConn := tls.Client(rawConn, &tls.Config{
+				ServerName: serverName,
+				MinVersion: tls.VersionTLS12,
+			})
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				_ = rawConn.Close()
+				return nil, err
+			}
+			return tlsConn, nil
+		},
+		OpenUpstreamTCP: func(ctx context.Context, destination netip.AddrPort) (net.Conn, error) {
+			return markedDialer.DialContext(ctx, "tcp", destination.String())
+		},
+	})
+	if err != nil {
+		return runtime.Service{}, nil, fmt.Errorf("build https proxy: %w", err)
+	}
+	httpsService, err := mitm.NewService(mitm.ServiceConfig{
+		ListenAddr: cfg.HTTPS.Listen,
+	}, mitm.ServiceDependencies{
+		Handler: httpsProxy,
+	})
+	if err != nil {
+		return runtime.Service{}, nil, fmt.Errorf("build https service: %w", err)
+	}
+
 	dnsHandler := builders.newDNSProxy(dnsProxyConfig{
-		Mode:     cfg.Mode,
-		Policy:   p,
-		Upstream: upstream,
-		Trust:    liveTrustWriter{source: ebpfMgr},
-		Logger:   logger,
+		Mode:      cfg.Mode,
+		Policy:    p,
+		TrustPlan: trustPlan,
+		Upstream:  upstream,
+		Trust:     liveTrustWriter{source: ebpfMgr},
+		Logger:    logger,
 	})
 	dnsLC := builders.newDNSLifecycle(cfg.DNS.Listen, dnsHandler)
 
@@ -231,6 +302,7 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 		Redirect: redirectMgr,
 		EBPF:     ebpfMgr,
 		DNS:      dnsLC,
+		HTTPS:    httpsService,
 	}, ebpfMgr, nil
 }
 
@@ -292,17 +364,27 @@ func (b componentBuilders) withDefaults(logger *slog.Logger) componentBuilders {
 	}
 	if b.newRedirectManager == nil {
 		b.newRedirectManager = func(cfg config.Config) (runtime.Lifecycle, error) {
-			_, portStr, err := net.SplitHostPort(cfg.DNS.Listen)
+			_, dnsPortStr, err := net.SplitHostPort(cfg.DNS.Listen)
 			if err != nil {
 				return nil, fmt.Errorf("parse dns listen address: %w", err)
 			}
-			port, err := strconv.Atoi(portStr)
+			dnsPort, err := strconv.Atoi(dnsPortStr)
 			if err != nil {
 				return nil, fmt.Errorf("parse dns listen port: %w", err)
 			}
+			_, httpsPortStr, err := net.SplitHostPort(cfg.HTTPS.Listen)
+			if err != nil {
+				return nil, fmt.Errorf("parse https listen address: %w", err)
+			}
+			httpsPort, err := strconv.Atoi(httpsPortStr)
+			if err != nil {
+				return nil, fmt.Errorf("parse https listen port: %w", err)
+			}
 			return redirect.NewManager(redirect.Config{
-				ListenPort: port,
-				Mark:       uint32(cfg.DNS.Mark),
+				DNSListenPort:   dnsPort,
+				HTTPSListenPort: httpsPort,
+				HTTPSPorts:      append([]int(nil), cfg.HTTPS.Ports...),
+				Mark:            uint32(cfg.DNS.Mark),
 			}, redirect.Dependencies{})
 		}
 	}
@@ -319,5 +401,35 @@ func (b componentBuilders) withDefaults(logger *slog.Logger) componentBuilders {
 			}
 		}
 	}
+	if b.newMarkedDialer == nil {
+		b.newMarkedDialer = func(mark uint32) (*net.Dialer, error) {
+			return netx.NewMarkedDialer(mark)
+		}
+	}
 	return b
+}
+
+func mitmTrustRules(rules []config.HTTPSMITMRule) []policy.MITMHostPortRule {
+	out := make([]policy.MITMHostPortRule, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, policy.MITMHostPortRule{
+			Host: rule.Host,
+			Port: uint16(rule.Port),
+		})
+	}
+	return out
+}
+
+func mitmHTTPRules(rules []config.HTTPSMITMRule) []httppolicy.Rule {
+	out := make([]httppolicy.Rule, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, httppolicy.Rule{
+			Host:    rule.Host,
+			Port:    uint16(rule.Port),
+			Methods: append([]string(nil), rule.Methods...),
+			Paths:   append([]string(nil), rule.Paths...),
+			Action:  httppolicy.Action(rule.Action),
+		})
+	}
+	return out
 }

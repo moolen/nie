@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -25,6 +26,7 @@ type Config struct {
 	DNS       DNS    `yaml:"dns"`
 	Policy    Policy `yaml:"policy"`
 	HTTPS     HTTPS  `yaml:"https"`
+	Trust     Trust  `yaml:"trust"`
 }
 
 type DNS struct {
@@ -66,6 +68,11 @@ type HTTPSMITMRule struct {
 	Methods []string `yaml:"methods"`
 	Paths   []string `yaml:"paths"`
 	Action  string   `yaml:"action"`
+}
+
+type Trust struct {
+	MaxStaleHold time.Duration `yaml:"max_stale_hold"`
+	SweepInterval time.Duration `yaml:"sweep_interval"`
 }
 
 var ErrEmptyConfig = errors.New("config is empty")
@@ -235,6 +242,12 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("invalid https.mitm.rules[%d].action %q", i, rule.Action)
 		}
+	}
+	if c.Trust.MaxStaleHold < 0 {
+		return errors.New("trust.max_stale_hold must be greater than or equal to 0")
+	}
+	if c.Trust.SweepInterval < 0 {
+		return errors.New("trust.sweep_interval must be greater than or equal to 0")
 	}
 	return nil
 }

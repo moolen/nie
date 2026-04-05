@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -23,6 +24,11 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/moolen/nie/internal/netx"
+)
+
+const (
+	spectreRepoURL   = "https://github.com/moolen/spectre"
+	spectrePinnedRev = "e49f8e0899616842cff5441bc4d9ee10c0667f20"
 )
 
 func TestSmoke_AuditModeAllowsUnknownTrafficButEmitsWouldDeny(t *testing.T) {
@@ -381,6 +387,7 @@ func TestExtractAuditedDomains(t *testing.T) {
 		`time=2026-04-05T00:00:02Z level=INFO msg=would_deny_https host=AUTH.DOCKER.IO`,
 		`time=2026-04-05T00:00:03Z level=INFO msg=would_deny_egress proto=tcp dst=203.0.113.10 port=443`,
 		`time=2026-04-05T00:00:04Z level=INFO msg=would_deny_https host=registry-1.docker.io`,
+		`time=2026-04-05T00:00:05Z level=INFO msg=would_deny_https host=REGISTRY-1.DOCKER.IO..`,
 		`time=2026-04-05T00:00:05Z level=INFO msg=would_deny_dns host=registry.npmjs.org.`,
 	}, "\n")
 
@@ -396,6 +403,23 @@ func TestExtractAuditedDomains(t *testing.T) {
 	}
 }
 
+func TestParseDefaultRouteInterface(t *testing.T) {
+	got, err := parseDefaultRouteInterface("default via 192.0.2.1 dev eth0 proto dhcp src 192.0.2.10 metric 100")
+	if err != nil {
+		t.Fatalf("parseDefaultRouteInterface() error = %v, want nil", err)
+	}
+	if got != "eth0" {
+		t.Fatalf("parseDefaultRouteInterface() = %q, want %q", got, "eth0")
+	}
+}
+
+func TestNormalizeAuditedDomain(t *testing.T) {
+	got := normalizeAuditedDomain("AUTH.DOCKER.IO.")
+	if got != "auth.docker.io" {
+		t.Fatalf("normalizeAuditedDomain() = %q, want %q", got, "auth.docker.io")
+	}
+}
+
 func extractAuditedDomains(logs string) map[string]struct{} {
 	domains := make(map[string]struct{})
 	scanner := bufio.NewScanner(strings.NewReader(logs))
@@ -408,7 +432,7 @@ func extractAuditedDomains(logs string) map[string]struct{} {
 		if !ok {
 			continue
 		}
-		host = strings.TrimSuffix(strings.ToLower(host), ".")
+		host = normalizeAuditedDomain(host)
 		if host == "" {
 			continue
 		}
@@ -436,6 +460,59 @@ func logFieldValue(line, key string) (string, bool) {
 		value = value[:end]
 	}
 	return value, value != ""
+}
+
+func normalizeAuditedDomain(host string) string {
+	return strings.TrimRight(strings.ToLower(strings.TrimSpace(host)), ".")
+}
+
+func defaultRouteInterface(t *testing.T) string {
+	t.Helper()
+
+	output, err := exec.Command("ip", "route", "show", "default").CombinedOutput()
+	if err != nil {
+		t.Fatalf("ip route show default: %v\n%s", err, output)
+	}
+	iface, err := parseDefaultRouteInterface(string(output))
+	if err != nil {
+		t.Fatalf("parse default route interface: %v\n%s", err, output)
+	}
+	return iface
+}
+
+func parseDefaultRouteInterface(output string) (string, error) {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		for i := 0; i < len(fields)-1; i++ {
+			if fields[i] == "dev" && fields[i+1] != "" {
+				return fields[i+1], nil
+			}
+		}
+	}
+	return "", errors.New("default route interface not found")
+}
+
+func checkoutPinnedSpectre(t *testing.T, dir string) string {
+	t.Helper()
+
+	repoDir := filepath.Join(dir, "spectre")
+
+	clone := exec.Command("git", "clone", "--depth", "1", spectreRepoURL, repoDir)
+	if output, err := clone.CombinedOutput(); err != nil {
+		t.Fatalf("git clone spectre: %v\n%s", err, output)
+	}
+
+	fetch := exec.Command("git", "-C", repoDir, "fetch", "--depth", "1", "origin", spectrePinnedRev)
+	if output, err := fetch.CombinedOutput(); err != nil {
+		t.Fatalf("git fetch spectre pinned rev: %v\n%s", err, output)
+	}
+
+	checkout := exec.Command("git", "-C", repoDir, "checkout", "--detach", spectrePinnedRev)
+	if output, err := checkout.CombinedOutput(); err != nil {
+		t.Fatalf("git checkout spectre pinned rev: %v\n%s", err, output)
+	}
+
+	return repoDir
 }
 
 type lockedBuffer struct {

@@ -19,6 +19,7 @@ import (
 	"github.com/moolen/nie/internal/config"
 	"github.com/moolen/nie/internal/ebpf"
 	"github.com/moolen/nie/internal/runtime"
+	"github.com/moolen/nie/internal/trustsync"
 )
 
 func TestAppPackageScaffold(t *testing.T) {
@@ -364,11 +365,30 @@ func TestBuildComponentsUsesLiveTrustReconciler(t *testing.T) {
 		},
 	}
 
-	if _, err := buildComponents(cfg, logger, builders); err != nil {
+	svc, err := buildComponents(cfg, logger, builders)
+	if err != nil {
 		t.Fatalf("buildComponents() error = %v", err)
+	}
+	if svc.Trust == nil {
+		t.Fatal("buildComponents() returned nil trust lifecycle")
+	}
+	lifecycleSync, ok := svc.Trust.(*trustsync.Service)
+	if !ok {
+		t.Fatalf("buildComponents() trust lifecycle type = %T, want *trustsync.Service", svc.Trust)
 	}
 	if capturedReconciler == nil {
 		t.Fatal("buildComponents() passed nil trust reconciler")
+	}
+	reconcilerImpl, ok := capturedReconciler.(liveTrustReconciler)
+	if !ok {
+		t.Fatalf("capturedReconciler type = %T, want liveTrustReconciler", capturedReconciler)
+	}
+	reconcilerSync, ok := reconcilerImpl.sync.(*trustsync.Service)
+	if !ok {
+		t.Fatalf("live trust reconciler sync type = %T, want *trustsync.Service", reconcilerImpl.sync)
+	}
+	if reconcilerSync != lifecycleSync {
+		t.Fatal("buildComponents() did not share trust service between reconciler and lifecycle")
 	}
 
 	entry := ebpf.TrustEntry{

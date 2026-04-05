@@ -1,6 +1,7 @@
 package trustsync
 
 import (
+	"context"
 	"net/netip"
 	"sort"
 	"sync"
@@ -32,25 +33,35 @@ type ConntrackInspector interface {
 }
 
 type ServiceConfig struct {
-	MaxStaleHold time.Duration
-	Now          func() time.Time
-	Conntrack    ConntrackInspector
+	MaxStaleHold  time.Duration
+	SweepInterval time.Duration
+	Now           func() time.Time
+	Conntrack     ConntrackInspector
 }
 
 type Service struct {
-	maxStaleHold time.Duration
-	now          func() time.Time
-	conntrack    ConntrackInspector
+	maxStaleHold  time.Duration
+	sweepInterval time.Duration
+	now           func() time.Time
+	conntrack     ConntrackInspector
 
 	mu           sync.Mutex
 	hostLeases   map[string]map[Destination]struct{}
 	destinations map[Destination]AggregateState
+	runCancel    context.CancelFunc
+	runDone      chan struct{}
 }
+
+const defaultSweepInterval = 30 * time.Second
 
 func New(cfg ServiceConfig) *Service {
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
+	}
+	sweepInterval := cfg.SweepInterval
+	if sweepInterval <= 0 {
+		sweepInterval = defaultSweepInterval
 	}
 	conntrack := cfg.Conntrack
 	if conntrack == nil {
@@ -58,11 +69,65 @@ func New(cfg ServiceConfig) *Service {
 	}
 
 	return &Service{
-		maxStaleHold: cfg.MaxStaleHold,
-		now:          now,
-		conntrack:    conntrack,
-		hostLeases:   make(map[string]map[Destination]struct{}),
-		destinations: make(map[Destination]AggregateState),
+		maxStaleHold:  cfg.MaxStaleHold,
+		sweepInterval: sweepInterval,
+		now:           now,
+		conntrack:     conntrack,
+		hostLeases:    make(map[string]map[Destination]struct{}),
+		destinations:  make(map[Destination]AggregateState),
+	}
+}
+
+func (s *Service) Start(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.runCancel != nil {
+		return nil
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.runCancel = cancel
+	s.runDone = done
+
+	go s.runPruner(runCtx, done)
+	return nil
+}
+
+func (s *Service) Stop(ctx context.Context) error {
+	s.mu.Lock()
+	cancel := s.runCancel
+	done := s.runDone
+	s.runCancel = nil
+	s.runDone = nil
+	s.mu.Unlock()
+
+	if cancel == nil || done == nil {
+		return nil
+	}
+
+	cancel()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Service) runPruner(ctx context.Context, done chan struct{}) {
+	ticker := time.NewTicker(s.sweepInterval)
+	defer ticker.Stop()
+	defer close(done)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.PruneStale()
+		}
 	}
 }
 

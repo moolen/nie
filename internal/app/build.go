@@ -114,9 +114,10 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("build dns trust plan: %w", err)
 	}
+	trustService := trustsync.New(trustsync.ServiceConfig{})
 	trustReconciler := liveTrustReconciler{
 		source: ebpfMgr,
-		sync:   trustsync.New(trustsync.ServiceConfig{}),
+		sync:   trustService,
 	}
 	httpPolicy, err := httppolicy.New(mitmHTTPRules(cfg.HTTPS.MITM.Rules))
 	if err != nil {
@@ -184,6 +185,7 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 	return runtime.Service{
 		Redirect: redirectMgr,
 		EBPF:     ebpfMgr,
+		Trust:    trustService,
 		DNS:      dnsLC,
 		HTTPS:    httpsService,
 	}, ebpfMgr, nil

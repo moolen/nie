@@ -36,6 +36,10 @@ dns:
     - 9.9.9.9:53
   mark: 4242
 
+trust:
+  max_stale_hold: 0s
+  sweep_interval: 30s
+
 policy:
   default: deny
   allow:
@@ -115,6 +119,14 @@ allowed TCP flows to configured intercepted HTTPS ports; UDP to those ports
 still follows the existing non-HTTP deny/audit path. For non-matching non-CIDR
 traffic, `enforce` still drops by default and `audit` still allows and logs.
 
+`trust` configures how NIE prunes stale DNS-learned destinations. `max_stale_hold`
+adds optional extra time before a stale destination is eligible for removal, and
+`sweep_interval` controls how often the background stale-destination cleanup runs.
+`max_stale_hold: 0s` means there is no additional hold beyond built-in lease and
+flow checks, but active TCP conntrack entries still prevent pruning until those
+flows drain. Cleanup cadence is operator-tunable via `sweep_interval`; when
+omitted, NIE keeps the default conservative sweep behavior.
+
 For intercepted HTTPS, NIE classifies the TLS connection by SNI and then also
 requires the decrypted HTTP `Host` / HTTP/2 `:authority` to normalize to the
 same hostname. In `enforce`, mismatches are denied. In `audit`, they are
@@ -135,7 +147,7 @@ Glob semantics:
 4. In `enforce`, denied names are answered locally with `REFUSED`.
 5. In `audit`, denied names are still forwarded upstream and logged as `would_deny_dns`.
 6. Relevant A-record answers for the queried hostname, or for names reached through an in-answer CNAME chain, are reconciled into trusted IPv4 entries for the eBPF allow map per hostname over time (not append-only) and only on configured intercepted HTTPS / MITM service ports.
-7. Cleanup is protocol-aware: stale UDP destinations age out by DNS lease timing, while stale TCP destinations are removed only after conntrack indicates no active flows, so old TCP destinations may remain trusted briefly while flows drain.
+7. Cleanup is protocol-aware and tunable via `trust.max_stale_hold` and `trust.sweep_interval`: stale UDP destinations age out by DNS lease timing plus any configured stale hold, while stale TCP destinations are removed only after conntrack indicates no active flows, so old TCP destinations may remain trusted briefly while flows drain even with `max_stale_hold: 0s`.
 8. The tc egress program uses `dns.mark` as a bypass mark for proxy-originated DNS traffic.
 
 ## Runtime Lifecycle

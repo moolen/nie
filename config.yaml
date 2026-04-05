@@ -5,6 +5,9 @@ dns:
   upstreams:
     - 1.1.1.1:53
   mark: 4242
+trust:
+  max_stale_hold: 0s
+  sweep_interval: 30s
 policy:
   default: deny
   allow:

@@ -174,13 +174,13 @@ func (s *Service) ReplaceHostAnswers(host string, destinations []Destination) {
 
 	if len(next) == 0 {
 		delete(s.hostLeases, host)
+		s.refreshRetainedLocked(context.Background(), now, refresh)
 		s.mu.Unlock()
-		s.refreshRetained(context.Background(), now, refresh)
 		return
 	}
 	s.hostLeases[host] = next
+	s.refreshRetainedLocked(context.Background(), now, refresh)
 	s.mu.Unlock()
-	s.refreshRetained(context.Background(), now, refresh)
 }
 
 func (s *Service) ReconcileHostAnswers(host string, destinations []Destination) {
@@ -194,9 +194,8 @@ func (s *Service) PruneStale() []Destination {
 func (s *Service) pruneStale(ctx context.Context) []Destination {
 	s.mu.Lock()
 	now := s.now()
-	pruned, refresh := s.pruneStaleLocked(ctx, now)
+	pruned := s.pruneStaleLocked(ctx, now)
 	s.mu.Unlock()
-	s.refreshRetained(ctx, now, refresh)
 	return pruned
 }
 
@@ -239,32 +238,31 @@ func (s *Service) decrementRefLocked(dst Destination, now time.Time) bool {
 	return becameStale
 }
 
-func (s *Service) pruneStaleLocked(ctx context.Context, now time.Time) ([]Destination, []Destination) {
+func (s *Service) pruneStaleLocked(ctx context.Context, now time.Time) []Destination {
 	var pruned []Destination
-	var refresh []Destination
 
 	for dst, state := range s.destinations {
 		if !state.Stale || state.RefCount != 0 || state.StaleSince.IsZero() {
 			continue
 		}
 		if s.maxStaleHold > 0 && now.Sub(state.StaleSince) < s.maxStaleHold {
-			refresh = append(refresh, dst)
+			s.refreshRetainedLocked(ctx, now, []Destination{dst})
 			continue
 		}
 		if dst.Protocol == ProtocolTCP && s.conntrack != nil {
 			active, err := s.conntrack.HasActiveTCPFlow(dst)
 			if err != nil {
-				refresh = append(refresh, dst)
+				s.refreshRetainedLocked(ctx, now, []Destination{dst})
 				continue
 			}
 			if active {
-				refresh = append(refresh, dst)
+				s.refreshRetainedLocked(ctx, now, []Destination{dst})
 				continue
 			}
 		}
 		if s.deleter != nil {
 			if err := s.deleter.DeleteDestination(ctx, dst); err != nil {
-				refresh = append(refresh, dst)
+				s.refreshRetainedLocked(ctx, now, []Destination{dst})
 				continue
 			}
 		}
@@ -282,10 +280,10 @@ func (s *Service) pruneStaleLocked(ctx context.Context, now time.Time) ([]Destin
 		return pruned[i].IP.Less(pruned[j].IP)
 	})
 
-	return pruned, refresh
+	return pruned
 }
 
-func (s *Service) refreshRetained(ctx context.Context, now time.Time, destinations []Destination) {
+func (s *Service) refreshRetainedLocked(ctx context.Context, now time.Time, destinations []Destination) {
 	if s.refresher == nil || len(destinations) == 0 {
 		return
 	}

@@ -271,7 +271,7 @@ func TestSmoke_EnforceKeepsActiveTCPFlowAcrossDNSRotationAndEventuallyPrunesStal
 	cleanupStaleNieRedirectState(t)
 
 	binPath := resolveNieBinary(t, root, tmpDir)
-	upstream := startRotatingFakeUpstream(t, fixtureA.IP)
+	upstream := startRotatingFakeUpstreamWithTTL(t, fixtureA.IP, 1)
 	listenAddr := pickFreeListenAddr(t)
 	httpsListenAddr := pickFreeTCPAddr(t)
 	configPath := filepath.Join(tmpDir, "config.yaml")
@@ -339,6 +339,8 @@ func TestSmoke_EnforceKeepsActiveTCPFlowAcrossDNSRotationAndEventuallyPrunesStal
 	if !hasIPv4Answer(respB, fixtureB.IP) {
 		t.Fatalf("second response answers = %#v, want A %s", respB.Answer, fixtureB.IP)
 	}
+
+	time.Sleep(1500 * time.Millisecond)
 
 	if got := waitForProbeResults(t, 5*time.Second, func() string {
 		return tcpExchangeResult(fixtureTCPEchoAddr(fixtureB.IP), 300*time.Millisecond)
@@ -434,6 +436,12 @@ type rotatingFakeUpstream struct {
 func startRotatingFakeUpstream(t *testing.T, answerIP string) *rotatingFakeUpstream {
 	t.Helper()
 
+	return startRotatingFakeUpstreamWithTTL(t, answerIP, 60)
+}
+
+func startRotatingFakeUpstreamWithTTL(t *testing.T, answerIP string, ttl uint32) *rotatingFakeUpstream {
+	t.Helper()
+
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen fake upstream: %v", err)
@@ -455,7 +463,7 @@ func startRotatingFakeUpstream(t *testing.T, answerIP string) *rotatingFakeUpstr
 						Name:   req.Question[0].Name,
 						Rrtype: dns.TypeA,
 						Class:  dns.ClassINET,
-						Ttl:    60,
+						Ttl:    ttl,
 					},
 					A: ip,
 				}}

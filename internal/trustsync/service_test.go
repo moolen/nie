@@ -154,6 +154,72 @@ func TestReplaceHostAnswersDoesNotImplicitlyPruneExpiredStale(t *testing.T) {
 	}
 }
 
+func TestPruneStalePinsTCPDestinationWhileConntrackActive(t *testing.T) {
+	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	conntrack := &fakeConntrackInspector{
+		activeByDestination: map[Destination]bool{},
+	}
+	svc := New(ServiceConfig{
+		MaxStaleHold: 1 * time.Minute,
+		Now:          clock,
+		Conntrack:    conntrack,
+	})
+
+	dst := mustDestinationWithProtocol(t, "203.0.113.10", 443, ProtocolTCP)
+	conntrack.activeByDestination[dst] = true
+
+	svc.ReplaceHostAnswers("api.example.com", []Destination{dst})
+	now = now.Add(10 * time.Second)
+	svc.ReplaceHostAnswers("api.example.com", nil)
+
+	now = now.Add(2 * time.Minute)
+	pruned := svc.PruneStale()
+	if len(pruned) != 0 {
+		t.Fatalf("PruneStale() pruned %v, want no prune while conntrack active", pruned)
+	}
+	assertState(t, svc, dst, AggregateState{
+		RefCount:   0,
+		Stale:      true,
+		StaleSince: time.Date(2026, 4, 5, 12, 0, 10, 0, time.UTC),
+	})
+
+	conntrack.activeByDestination[dst] = false
+	pruned = svc.PruneStale()
+	if len(pruned) != 1 || pruned[0] != dst {
+		t.Fatalf("PruneStale() = %v, want [%v] when conntrack is idle", pruned, dst)
+	}
+}
+
+func TestPruneStaleIgnoresConntrackForUDP(t *testing.T) {
+	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	conntrack := &fakeConntrackInspector{
+		activeByDestination: map[Destination]bool{},
+	}
+	svc := New(ServiceConfig{
+		MaxStaleHold: 1 * time.Minute,
+		Now:          clock,
+		Conntrack:    conntrack,
+	})
+
+	dst := mustDestinationWithProtocol(t, "203.0.113.20", 53, ProtocolUDP)
+	conntrack.activeByDestination[dst] = true
+
+	svc.ReplaceHostAnswers("dns.example.com", []Destination{dst})
+	now = now.Add(5 * time.Second)
+	svc.ReplaceHostAnswers("dns.example.com", nil)
+
+	now = now.Add(2 * time.Minute)
+	pruned := svc.PruneStale()
+	if len(pruned) != 1 || pruned[0] != dst {
+		t.Fatalf("PruneStale() = %v, want UDP destination pruned regardless of conntrack", pruned)
+	}
+	if conntrack.calls != 0 {
+		t.Fatalf("conntrack calls = %d, want 0 for UDP prune", conntrack.calls)
+	}
+}
+
 func assertState(t *testing.T, svc *Service, dst Destination, want AggregateState) {
 	t.Helper()
 	got, ok := svc.State(dst)
@@ -173,6 +239,11 @@ func assertState(t *testing.T, svc *Service, dst Destination, want AggregateStat
 
 func mustDestination(t *testing.T, rawIP string, port uint16) Destination {
 	t.Helper()
+	return mustDestinationWithProtocol(t, rawIP, port, ProtocolTCP)
+}
+
+func mustDestinationWithProtocol(t *testing.T, rawIP string, port uint16, protocol Protocol) Destination {
+	t.Helper()
 	ip, err := netip.ParseAddr(rawIP)
 	if err != nil {
 		t.Fatalf("ParseAddr(%q) error = %v", rawIP, err)
@@ -183,5 +254,17 @@ func mustDestination(t *testing.T, rawIP string, port uint16) Destination {
 	return Destination{
 		IP:   ip,
 		Port: port,
+		// Keep tests explicit about transport to validate pruning behavior.
+		Protocol: protocol,
 	}
+}
+
+type fakeConntrackInspector struct {
+	activeByDestination map[Destination]bool
+	calls               int
+}
+
+func (f *fakeConntrackInspector) HasActiveTCPFlow(dst Destination) (bool, error) {
+	f.calls++
+	return f.activeByDestination[dst], nil
 }

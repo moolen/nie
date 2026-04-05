@@ -8,9 +8,18 @@ import (
 )
 
 type Destination struct {
-	IP   netip.Addr
-	Port uint16
+	IP       netip.Addr
+	Port     uint16
+	Protocol Protocol
 }
+
+type Protocol uint8
+
+const (
+	ProtocolUnspecified Protocol = 0
+	ProtocolTCP         Protocol = 6
+	ProtocolUDP         Protocol = 17
+)
 
 type AggregateState struct {
 	RefCount   int
@@ -18,14 +27,20 @@ type AggregateState struct {
 	StaleSince time.Time
 }
 
+type ConntrackInspector interface {
+	HasActiveTCPFlow(dst Destination) (bool, error)
+}
+
 type ServiceConfig struct {
 	MaxStaleHold time.Duration
 	Now          func() time.Time
+	Conntrack    ConntrackInspector
 }
 
 type Service struct {
 	maxStaleHold time.Duration
 	now          func() time.Time
+	conntrack    ConntrackInspector
 
 	mu           sync.Mutex
 	hostLeases   map[string]map[Destination]struct{}
@@ -37,10 +52,15 @@ func New(cfg ServiceConfig) *Service {
 	if now == nil {
 		now = time.Now
 	}
+	conntrack := cfg.Conntrack
+	if conntrack == nil {
+		conntrack = newConntrackInspector()
+	}
 
 	return &Service{
 		maxStaleHold: cfg.MaxStaleHold,
 		now:          now,
+		conntrack:    conntrack,
 		hostLeases:   make(map[string]map[Destination]struct{}),
 		destinations: make(map[Destination]AggregateState),
 	}
@@ -131,12 +151,21 @@ func (s *Service) pruneStaleLocked(now time.Time) []Destination {
 		if s.maxStaleHold > 0 && now.Sub(state.StaleSince) < s.maxStaleHold {
 			continue
 		}
+		if dst.Protocol == ProtocolTCP && s.conntrack != nil {
+			active, err := s.conntrack.HasActiveTCPFlow(dst)
+			if err == nil && active {
+				continue
+			}
+		}
 		delete(s.destinations, dst)
 		pruned = append(pruned, dst)
 	}
 
 	sort.Slice(pruned, func(i, j int) bool {
 		if pruned[i].IP == pruned[j].IP {
+			if pruned[i].Port == pruned[j].Port {
+				return pruned[i].Protocol < pruned[j].Protocol
+			}
 			return pruned[i].Port < pruned[j].Port
 		}
 		return pruned[i].IP.Less(pruned[j].IP)

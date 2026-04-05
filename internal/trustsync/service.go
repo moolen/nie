@@ -51,7 +51,6 @@ func (s *Service) ReplaceHostAnswers(host string, destinations []Destination) {
 	defer s.mu.Unlock()
 
 	now := s.now()
-	_ = s.pruneStaleLocked(now)
 
 	next := make(map[Destination]struct{}, len(destinations))
 	for _, dst := range destinations {

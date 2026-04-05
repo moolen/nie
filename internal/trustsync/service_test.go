@@ -123,6 +123,37 @@ func TestPruneStaleRemovesAfterMaxHold(t *testing.T) {
 	}
 }
 
+func TestReplaceHostAnswersDoesNotImplicitlyPruneExpiredStale(t *testing.T) {
+	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	svc := New(ServiceConfig{
+		MaxStaleHold: 1 * time.Minute,
+		Now:          clock,
+	})
+
+	staleDst := mustDestination(t, "203.0.113.10", 443)
+	activeDst := mustDestination(t, "203.0.113.11", 443)
+
+	svc.ReplaceHostAnswers("api.example.com", []Destination{staleDst})
+	now = now.Add(10 * time.Second)
+	svc.ReplaceHostAnswers("api.example.com", nil)
+
+	now = now.Add(2 * time.Minute)
+	svc.ReplaceHostAnswers("cdn.example.com", []Destination{activeDst})
+
+	assertState(t, svc, staleDst, AggregateState{
+		RefCount:   0,
+		Stale:      true,
+		StaleSince: time.Date(2026, 4, 5, 12, 0, 10, 0, time.UTC),
+	})
+	assertState(t, svc, activeDst, AggregateState{RefCount: 1})
+
+	pruned := svc.PruneStale()
+	if len(pruned) != 1 || pruned[0] != staleDst {
+		t.Fatalf("PruneStale() = %v, want [%v]", pruned, staleDst)
+	}
+}
+
 func assertState(t *testing.T, svc *Service, dst Destination, want AggregateState) {
 	t.Helper()
 	got, ok := svc.State(dst)

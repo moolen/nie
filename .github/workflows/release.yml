@@ -54,6 +54,10 @@ jobs:
         if: steps.after.outputs.tag != '' && steps.after.outputs.tag != steps.before.outputs.tag
         run: git checkout "${{ steps.after.outputs.tag }}"
 
+      - name: Clean npm workspace before GoReleaser
+        if: steps.after.outputs.tag != '' && steps.after.outputs.tag != steps.before.outputs.tag
+        run: rm -rf node_modules
+
       - name: Publish release assets
         if: steps.after.outputs.tag != '' && steps.after.outputs.tag != steps.before.outputs.tag
         uses: goreleaser/goreleaser-action@v7

@@ -3,6 +3,7 @@ package dnsproxy
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -49,6 +50,114 @@ func TestServeDNS_AuditDeniedHostForwardsAndLearnsARecords(t *testing.T) {
 	resp := exchangeLocal(t, srv, question("example.com."))
 	if len(resp.Answer) != 1 || len(learned) != 1 || learned[0] != "203.0.113.10" {
 		t.Fatalf("answer=%v learned=%v", resp.Answer, learned)
+	}
+}
+
+func TestServeDNS_ReconcilesFullAcceptedHostAnswerSet(t *testing.T) {
+	reconciler := &reconcileCapture{}
+	srv := New(ServerConfig{
+		Mode:   config.ModeAudit,
+		Policy: allowOnly("*.github.com"),
+		TrustPlan: trustPlanForTests(map[string][]uint16{
+			"api.github.com": {443, 8443},
+		}),
+		Upstream: fakeUpstream(func(q string) *dns.Msg {
+			return replyWithRecords(question(q),
+				&dns.CNAME{
+					Hdr: dns.RR_Header{
+						Name:   q,
+						Rrtype: dns.TypeCNAME,
+						Class:  dns.ClassINET,
+						Ttl:    60,
+					},
+					Target: "edge.github.net.",
+				},
+				&dns.A{
+					Hdr: dns.RR_Header{
+						Name:   "edge.github.net.",
+						Rrtype: dns.TypeA,
+						Class:  dns.ClassINET,
+						Ttl:    60,
+					},
+					A: net.ParseIP("203.0.113.10"),
+				},
+				&dns.A{
+					Hdr: dns.RR_Header{
+						Name:   "edge.github.net.",
+						Rrtype: dns.TypeA,
+						Class:  dns.ClassINET,
+						Ttl:    60,
+					},
+					A: net.ParseIP("203.0.113.11"),
+				},
+				&dns.A{
+					Hdr: dns.RR_Header{
+						Name:   "unrelated.example.com.",
+						Rrtype: dns.TypeA,
+						Class:  dns.ClassINET,
+						Ttl:    60,
+					},
+					A: net.ParseIP("203.0.113.99"),
+				},
+			)
+		}),
+		Reconciler: reconciler,
+		Trust:      failTrustWriter{t: t},
+	})
+
+	_ = exchangeLocal(t, srv, question("api.github.com."))
+
+	if len(reconciler.calls) != 1 {
+		t.Fatalf("reconciler calls = %d, want 1", len(reconciler.calls))
+	}
+	call := reconciler.calls[0]
+	if call.host != "api.github.com" {
+		t.Fatalf("reconciler host = %q, want %q", call.host, "api.github.com")
+	}
+	if got, want := entryKeySet(call.entries), map[string]struct{}{
+		"203.0.113.10:443":  {},
+		"203.0.113.10:8443": {},
+		"203.0.113.11:443":  {},
+		"203.0.113.11:8443": {},
+	}; !equalKeySet(got, want) {
+		t.Fatalf("reconciled entries = %v, want %v", got, want)
+	}
+}
+
+func TestServeDNS_ReconcilesEmptySetWhenNoAcceptedARecordsRemain(t *testing.T) {
+	reconciler := &reconcileCapture{}
+	srv := New(ServerConfig{
+		Mode:   config.ModeAudit,
+		Policy: allowOnly("*.github.com"),
+		TrustPlan: trustPlanForTests(map[string][]uint16{
+			"api.github.com": {443},
+		}),
+		Upstream: fakeUpstream(func(q string) *dns.Msg {
+			return replyWithRecords(question(q), &dns.AAAA{
+				Hdr: dns.RR_Header{
+					Name:   q,
+					Rrtype: dns.TypeAAAA,
+					Class:  dns.ClassINET,
+					Ttl:    60,
+				},
+				AAAA: net.ParseIP("2001:db8::1"),
+			})
+		}),
+		Reconciler: reconciler,
+		Trust:      failTrustWriter{t: t},
+	})
+
+	_ = exchangeLocal(t, srv, question("api.github.com."))
+
+	if len(reconciler.calls) != 1 {
+		t.Fatalf("reconciler calls = %d, want 1", len(reconciler.calls))
+	}
+	call := reconciler.calls[0]
+	if call.host != "api.github.com" {
+		t.Fatalf("reconciler host = %q, want %q", call.host, "api.github.com")
+	}
+	if len(call.entries) != 0 {
+		t.Fatalf("reconciled entries = %v, want empty set", call.entries)
 	}
 }
 
@@ -527,6 +636,58 @@ func (p *trustPlanStub) PortsForHost(host string) ([]uint16, bool) {
 		return nil, false
 	}
 	return ports, true
+}
+
+type failTrustWriter struct {
+	t *testing.T
+}
+
+func (w failTrustWriter) Allow(context.Context, ebpf.TrustEntry) error {
+	w.t.Helper()
+	w.t.Fatalf("unexpected direct trust writer Allow call")
+	return nil
+}
+
+type reconcileCall struct {
+	host    string
+	entries []ebpf.TrustEntry
+}
+
+type reconcileCapture struct {
+	calls []reconcileCall
+}
+
+func (c *reconcileCapture) ReconcileHost(ctx context.Context, host string, entries []ebpf.TrustEntry) error {
+	copied := append([]ebpf.TrustEntry(nil), entries...)
+	c.calls = append(c.calls, reconcileCall{
+		host:    host,
+		entries: copied,
+	})
+	return nil
+}
+
+func entryKeySet(entries []ebpf.TrustEntry) map[string]struct{} {
+	keys := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		keys[entry.IPv4.String()+":"+itoa(uint64(entry.Port))] = struct{}{}
+	}
+	return keys
+}
+
+func equalKeySet(got, want map[string]struct{}) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for key := range want {
+		if _, ok := got[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func itoa(v uint64) string {
+	return fmt.Sprintf("%d", v)
 }
 
 type responseRecorder struct {

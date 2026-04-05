@@ -20,6 +20,7 @@ import (
 	"github.com/moolen/nie/internal/policy"
 	"github.com/moolen/nie/internal/redirect"
 	"github.com/moolen/nie/internal/runtime"
+	"github.com/moolen/nie/internal/trustsync"
 )
 
 type policyAllows interface {
@@ -56,6 +57,35 @@ func (w liveTrustWriter) Allow(ctx context.Context, entry ebpf.TrustEntry) error
 		return err
 	}
 	return writer.Allow(ctx, entry)
+}
+
+type liveTrustReconciler struct {
+	source interface {
+		TrustWriter() (ebpf.TrustWriter, error)
+	}
+	sync interface {
+		ReconcileHostAnswers(host string, destinations []trustsync.Destination)
+	}
+}
+
+func (r liveTrustReconciler) ReconcileHost(ctx context.Context, host string, entries []ebpf.TrustEntry) error {
+	writer, err := r.source.TrustWriter()
+	if err != nil {
+		return err
+	}
+	destinations := make([]trustsync.Destination, 0, len(entries))
+	for _, entry := range entries {
+		if err := writer.Allow(ctx, entry); err != nil {
+			return err
+		}
+		destinations = append(destinations, trustsync.Destination{
+			IP:       entry.IPv4,
+			Port:     entry.Port,
+			Protocol: trustsync.ProtocolTCP,
+		})
+	}
+	r.sync.ReconcileHostAnswers(host, destinations)
+	return nil
 }
 
 func buildComponents(cfg config.Config, logger *slog.Logger, builders componentBuilders) (runtime.Service, error) {
@@ -97,6 +127,10 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 	trustPlan, err := policy.NewTrustPlan(cfg.Policy.Allow, httpsTrustedPorts(cfg.HTTPS.Ports), mitmTrustRules(cfg.HTTPS.MITM.Rules))
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("build dns trust plan: %w", err)
+	}
+	trustReconciler := liveTrustReconciler{
+		source: ebpfMgr,
+		sync:   trustsync.New(trustsync.ServiceConfig{}),
 	}
 	httpPolicy, err := httppolicy.New(mitmHTTPRules(cfg.HTTPS.MITM.Rules))
 	if err != nil {
@@ -152,12 +186,13 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 	}
 
 	dnsHandler := builders.newDNSProxy(dnsProxyConfig{
-		Mode:      cfg.Mode,
-		Policy:    p,
-		TrustPlan: trustPlan,
-		Upstream:  upstream,
-		Trust:     liveTrustWriter{source: ebpfMgr},
-		Logger:    logger,
+		Mode:       cfg.Mode,
+		Policy:     p,
+		TrustPlan:  trustPlan,
+		Upstream:   upstream,
+		Reconciler: trustReconciler,
+		Trust:      liveTrustWriter{source: ebpfMgr},
+		Logger:     logger,
 	})
 	dnsLC := builders.newDNSLifecycle(cfg.DNS.Listen, dnsHandler)
 

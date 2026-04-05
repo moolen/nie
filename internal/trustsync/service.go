@@ -99,6 +99,10 @@ func (s *Service) ReplaceHostAnswers(host string, destinations []Destination) {
 	s.hostLeases[host] = next
 }
 
+func (s *Service) ReconcileHostAnswers(host string, destinations []Destination) {
+	s.ReplaceHostAnswers(host, destinations)
+}
+
 func (s *Service) PruneStale() []Destination {
 	s.mu.Lock()
 	defer s.mu.Unlock()

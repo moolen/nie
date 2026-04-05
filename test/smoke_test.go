@@ -385,6 +385,7 @@ func TestExtractAuditedDomains(t *testing.T) {
 		`time=2026-04-05T00:00:00Z level=INFO msg=would_deny_dns host=registry.npmjs.org.`,
 		`time=2026-04-05T00:00:01Z level=INFO msg=would_deny_dns host=proxy.golang.org.`,
 		`time=2026-04-05T00:00:02Z level=INFO msg=would_deny_https host=AUTH.DOCKER.IO`,
+		`time=2026-04-05T00:00:02Z level=INFO msg=would_deny_dnsx host=ignored.example.com`,
 		`time=2026-04-05T00:00:03Z level=INFO msg=would_deny_egress proto=tcp dst=203.0.113.10 port=443`,
 		`time=2026-04-05T00:00:04Z level=INFO msg=would_deny_https host=registry-1.docker.io`,
 		`time=2026-04-05T00:00:05Z level=INFO msg=would_deny_https host=REGISTRY-1.DOCKER.IO..`,
@@ -425,7 +426,8 @@ func extractAuditedDomains(logs string) map[string]struct{} {
 	scanner := bufio.NewScanner(strings.NewReader(logs))
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.Contains(line, "would_deny_dns") && !strings.Contains(line, "would_deny_https") {
+		msg, ok := logFieldValue(line, "msg=")
+		if !ok || (msg != "would_deny_dns" && msg != "would_deny_https") {
 			continue
 		}
 		host, ok := logFieldValue(line, "host=")

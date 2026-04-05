@@ -81,6 +81,23 @@ Run `nie` as root for now. Native nftables and tc/BPF lifecycle operations requi
 - `make test-integration`: run the root-gated smoke test with `sudo -E go test -tags=integration ./test/...`
 - `make vm-test`: boot or reprovision the Vagrant VM and run the mounted repo validation flow inside the guest
 
+## Release Contract
+
+GoReleaser configuration lives in `.goreleaser.yaml` and is intentionally scoped to
+artifact packaging only.
+
+- project name is `nie`
+- build target is `./cmd/nie`
+- builds are Linux-only (`amd64`, `arm64`)
+- archives are `tar.gz` with stable names:
+  `nie_<version>_linux_<arch>.tar.gz`
+- each archive includes `README.md` and `config.yaml`
+- checksum output is `checksums.txt`
+- release notes ownership stays with semantic-release via
+  `release.mode: keep-existing`
+- existing release artifacts may be replaced via
+  `replace_existing_artifacts: true`
+
 ## VM Validation
 
 The repository includes a Vagrant workflow under `vm/vagrant` for validating `nie`

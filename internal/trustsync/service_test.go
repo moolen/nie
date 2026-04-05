@@ -1,6 +1,7 @@
 package trustsync
 
 import (
+	"errors"
 	"net/netip"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ func TestReplaceHostAnswersReplacesSet(t *testing.T) {
 	svc := New(ServiceConfig{
 		MaxStaleHold: 10 * time.Minute,
 		Now:          clock,
+		Conntrack:    newFakeConntrackInspector(),
 	})
 
 	dstA := mustDestination(t, "203.0.113.10", 443)
@@ -39,6 +41,7 @@ func TestReplaceHostAnswersSharedDestinationReferences(t *testing.T) {
 	svc := New(ServiceConfig{
 		MaxStaleHold: 10 * time.Minute,
 		Now:          clock,
+		Conntrack:    newFakeConntrackInspector(),
 	})
 
 	dst := mustDestination(t, "203.0.113.10", 443)
@@ -67,6 +70,7 @@ func TestReplaceHostAnswersMarksDroppedDestinationStale(t *testing.T) {
 	svc := New(ServiceConfig{
 		MaxStaleHold: 10 * time.Minute,
 		Now:          clock,
+		Conntrack:    newFakeConntrackInspector(),
 	})
 
 	dst := mustDestination(t, "203.0.113.10", 443)
@@ -92,6 +96,7 @@ func TestPruneStaleRemovesAfterMaxHold(t *testing.T) {
 	svc := New(ServiceConfig{
 		MaxStaleHold: 3 * time.Minute,
 		Now:          clock,
+		Conntrack:    newFakeConntrackInspector(),
 	})
 
 	dst := mustDestination(t, "203.0.113.10", 443)
@@ -129,6 +134,7 @@ func TestReplaceHostAnswersDoesNotImplicitlyPruneExpiredStale(t *testing.T) {
 	svc := New(ServiceConfig{
 		MaxStaleHold: 1 * time.Minute,
 		Now:          clock,
+		Conntrack:    newFakeConntrackInspector(),
 	})
 
 	staleDst := mustDestination(t, "203.0.113.10", 443)
@@ -157,9 +163,7 @@ func TestReplaceHostAnswersDoesNotImplicitlyPruneExpiredStale(t *testing.T) {
 func TestPruneStalePinsTCPDestinationWhileConntrackActive(t *testing.T) {
 	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
-	conntrack := &fakeConntrackInspector{
-		activeByDestination: map[Destination]bool{},
-	}
+	conntrack := newFakeConntrackInspector()
 	svc := New(ServiceConfig{
 		MaxStaleHold: 1 * time.Minute,
 		Now:          clock,
@@ -194,9 +198,7 @@ func TestPruneStalePinsTCPDestinationWhileConntrackActive(t *testing.T) {
 func TestPruneStaleIgnoresConntrackForUDP(t *testing.T) {
 	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
-	conntrack := &fakeConntrackInspector{
-		activeByDestination: map[Destination]bool{},
-	}
+	conntrack := newFakeConntrackInspector()
 	svc := New(ServiceConfig{
 		MaxStaleHold: 1 * time.Minute,
 		Now:          clock,
@@ -218,6 +220,35 @@ func TestPruneStaleIgnoresConntrackForUDP(t *testing.T) {
 	if conntrack.calls != 0 {
 		t.Fatalf("conntrack calls = %d, want 0 for UDP prune", conntrack.calls)
 	}
+}
+
+func TestPruneStaleSkipsTCPDestinationWhenConntrackErrors(t *testing.T) {
+	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	conntrack := newFakeConntrackInspector()
+	svc := New(ServiceConfig{
+		MaxStaleHold: 1 * time.Minute,
+		Now:          clock,
+		Conntrack:    conntrack,
+	})
+
+	dst := mustDestinationWithProtocol(t, "203.0.113.30", 443, ProtocolTCP)
+	conntrack.errByDestination[dst] = errors.New("conntrack unavailable")
+
+	svc.ReplaceHostAnswers("api.example.com", []Destination{dst})
+	now = now.Add(10 * time.Second)
+	svc.ReplaceHostAnswers("api.example.com", nil)
+
+	now = now.Add(2 * time.Minute)
+	pruned := svc.PruneStale()
+	if len(pruned) != 0 {
+		t.Fatalf("PruneStale() pruned %v, want no prune when conntrack lookup errors", pruned)
+	}
+	assertState(t, svc, dst, AggregateState{
+		RefCount:   0,
+		Stale:      true,
+		StaleSince: time.Date(2026, 4, 5, 12, 0, 10, 0, time.UTC),
+	})
 }
 
 func assertState(t *testing.T, svc *Service, dst Destination, want AggregateState) {
@@ -261,10 +292,21 @@ func mustDestinationWithProtocol(t *testing.T, rawIP string, port uint16, protoc
 
 type fakeConntrackInspector struct {
 	activeByDestination map[Destination]bool
+	errByDestination    map[Destination]error
 	calls               int
+}
+
+func newFakeConntrackInspector() *fakeConntrackInspector {
+	return &fakeConntrackInspector{
+		activeByDestination: map[Destination]bool{},
+		errByDestination:    map[Destination]error{},
+	}
 }
 
 func (f *fakeConntrackInspector) HasActiveTCPFlow(dst Destination) (bool, error) {
 	f.calls++
+	if err := f.errByDestination[dst]; err != nil {
+		return false, err
+	}
 	return f.activeByDestination[dst], nil
 }

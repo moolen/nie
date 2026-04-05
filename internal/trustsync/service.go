@@ -153,7 +153,10 @@ func (s *Service) pruneStaleLocked(now time.Time) []Destination {
 		}
 		if dst.Protocol == ProtocolTCP && s.conntrack != nil {
 			active, err := s.conntrack.HasActiveTCPFlow(dst)
-			if err == nil && active {
+			if err != nil {
+				continue
+			}
+			if active {
 				continue
 			}
 		}

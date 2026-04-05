@@ -1,3 +1,10 @@
+## [1.2.1](https://github.com/moolen/nie/compare/v1.2.0...v1.2.1) (2026-04-05)
+
+
+### Bug Fixes
+
+* make smoke ci loopback ipv4 only ([d4d91d1](https://github.com/moolen/nie/commit/d4d91d1287e7a554ad65fd5b47fd4ce2c897ba57))
+
 # [1.2.0](https://github.com/moolen/nie/compare/v1.1.0...v1.2.0) (2026-04-05)
 
 

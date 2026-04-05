@@ -1,3 +1,10 @@
+## [1.0.3](https://github.com/moolen/nie/compare/v1.0.2...v1.0.3) (2026-04-05)
+
+
+### Bug Fixes
+
+* harden mitm authority and ipv6 startup checks ([e1ef299](https://github.com/moolen/nie/commit/e1ef29960e16ac87ce28818eda62bdcfbad099cb))
+
 ## [1.0.2](https://github.com/moolen/nie/compare/v1.0.1...v1.0.2) (2026-04-05)
 
 

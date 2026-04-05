@@ -3,10 +3,10 @@ package dnsproxy
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 
@@ -25,7 +25,7 @@ func TestServeDNS_EnforceDeniedHostReturnsRefused(t *testing.T) {
 			t.Fatalf("upstream should not be called for %q", q)
 			return nil
 		}),
-		Trust: noopTrustWriter{},
+		Reconciler: noopReconciler{},
 	})
 
 	resp := exchangeLocal(t, srv, question("example.com."))
@@ -35,21 +35,28 @@ func TestServeDNS_EnforceDeniedHostReturnsRefused(t *testing.T) {
 }
 
 func TestServeDNS_AuditDeniedHostForwardsAndLearnsARecords(t *testing.T) {
-	var learned []string
+	reconciler := &reconcileCapture{}
 	srv := New(ServerConfig{
 		Mode:   config.ModeAudit,
 		Policy: allowOnly("*.github.com"),
 		TrustPlan: trustPlanForTests(map[string][]uint16{
 			"example.com": {0},
 		}),
-		Upstream: fakeUpstreamAnswer("example.com.", "203.0.113.10", 60),
-		Trust:    captureTrustWriter(&learned),
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Upstream:   fakeUpstreamAnswer("example.com.", "203.0.113.10", 60),
+		Reconciler: reconciler,
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 
 	resp := exchangeLocal(t, srv, question("example.com."))
-	if len(resp.Answer) != 1 || len(learned) != 1 || learned[0] != "203.0.113.10" {
-		t.Fatalf("answer=%v learned=%v", resp.Answer, learned)
+	if len(resp.Answer) != 1 {
+		t.Fatalf("answer=%v, want 1 record", resp.Answer)
+	}
+	if len(reconciler.calls) != 1 {
+		t.Fatalf("reconciler calls = %d, want 1", len(reconciler.calls))
+	}
+	entries := reconciler.calls[0].entries
+	if len(entries) != 1 || entries[0].IPv4.String() != "203.0.113.10" {
+		t.Fatalf("reconciled entries=%v, want one entry for 203.0.113.10", entries)
 	}
 }
 
@@ -102,7 +109,6 @@ func TestServeDNS_ReconcilesFullAcceptedHostAnswerSet(t *testing.T) {
 			)
 		}),
 		Reconciler: reconciler,
-		Trust:      failTrustWriter{t: t},
 	})
 
 	_ = exchangeLocal(t, srv, question("api.github.com."))
@@ -144,7 +150,6 @@ func TestServeDNS_ReconcilesEmptySetWhenNoAcceptedARecordsRemain(t *testing.T) {
 			})
 		}),
 		Reconciler: reconciler,
-		Trust:      failTrustWriter{t: t},
 	})
 
 	_ = exchangeLocal(t, srv, question("api.github.com."))
@@ -178,7 +183,7 @@ func TestServeDNS_AllowedHostForwardsUpstream(t *testing.T) {
 				A: net.ParseIP("203.0.113.20"),
 			})
 		}),
-		Trust: noopTrustWriter{},
+		Reconciler: noopReconciler{},
 	})
 
 	resp := exchangeLocal(t, srv, question("api.github.com."))
@@ -191,7 +196,7 @@ func TestServeDNS_AllowedHostForwardsUpstream(t *testing.T) {
 }
 
 func TestServeDNS_IgnoresAAAARecordsForTrustLearning(t *testing.T) {
-	var learned []string
+	reconciler := &reconcileCapture{}
 	srv := New(ServerConfig{
 		Mode:   config.ModeAudit,
 		Policy: allowOnly("*.github.com"),
@@ -209,36 +214,42 @@ func TestServeDNS_IgnoresAAAARecordsForTrustLearning(t *testing.T) {
 				AAAA: net.ParseIP("2001:db8::1"),
 			})
 		}),
-		Trust: captureTrustWriter(&learned),
+		Reconciler: reconciler,
 	})
 
 	resp := exchangeLocal(t, srv, question("api.github.com."))
 	if len(resp.Answer) != 1 {
 		t.Fatalf("answer=%v, want 1 AAAA record", resp.Answer)
 	}
-	if len(learned) != 0 {
-		t.Fatalf("learned=%v, want no IPv4 trust entries", learned)
+	if len(reconciler.calls) != 1 {
+		t.Fatalf("reconciler calls = %d, want 1", len(reconciler.calls))
+	}
+	if len(reconciler.calls[0].entries) != 0 {
+		t.Fatalf("reconciled entries=%v, want no IPv4 trust entries", reconciler.calls[0].entries)
 	}
 }
 
 func TestServeDNS_LearnsConfiguredPortsForMITMHost(t *testing.T) {
-	var learned []ebpf.TrustEntry
+	reconciler := &reconcileCapture{}
 	srv := New(ServerConfig{
-		Mode:      config.ModeEnforce,
-		Policy:    allowOnly("*.github.com"),
-		TrustPlan: trustPlanForTests(map[string][]uint16{"api.github.com": {443, 8443}}),
-		Upstream:  fakeUpstreamAnswer("api.github.com.", "203.0.113.10", 60),
-		Trust:     captureTrustEntries(&learned),
+		Mode:       config.ModeEnforce,
+		Policy:     allowOnly("*.github.com"),
+		TrustPlan:  trustPlanForTests(map[string][]uint16{"api.github.com": {443, 8443}}),
+		Upstream:   fakeUpstreamAnswer("api.github.com.", "203.0.113.10", 60),
+		Reconciler: reconciler,
 	})
 
 	_ = exchangeLocal(t, srv, question("api.github.com."))
-	if len(learned) != 2 {
-		t.Fatalf("learned = %v, want 2 port-specific entries", learned)
+	if len(reconciler.calls) != 1 {
+		t.Fatalf("reconciler calls = %d, want 1", len(reconciler.calls))
+	}
+	if len(reconciler.calls[0].entries) != 2 {
+		t.Fatalf("reconciled entries = %v, want 2 port-specific entries", reconciler.calls[0].entries)
 	}
 }
 
 func TestServeDNS_DoesNotLearnUnrelatedAAnswers(t *testing.T) {
-	var learned []ebpf.TrustEntry
+	reconciler := &reconcileCapture{}
 	srv := New(ServerConfig{
 		Mode:      config.ModeEnforce,
 		Policy:    allowOnly("*.github.com"),
@@ -254,17 +265,20 @@ func TestServeDNS_DoesNotLearnUnrelatedAAnswers(t *testing.T) {
 				A: net.ParseIP("203.0.113.10"),
 			})
 		}),
-		Trust: captureTrustEntries(&learned),
+		Reconciler: reconciler,
 	})
 
 	_ = exchangeLocal(t, srv, question("api.github.com."))
-	if len(learned) != 0 {
-		t.Fatalf("learned = %v, want no entries", learned)
+	if len(reconciler.calls) != 1 {
+		t.Fatalf("reconciler calls = %d, want 1", len(reconciler.calls))
+	}
+	if len(reconciler.calls[0].entries) != 0 {
+		t.Fatalf("reconciled entries = %v, want no entries", reconciler.calls[0].entries)
 	}
 }
 
 func TestServeDNS_LearnsAAnswersReachableThroughCNAMEChain(t *testing.T) {
-	var learned []ebpf.TrustEntry
+	reconciler := &reconcileCapture{}
 	srv := New(ServerConfig{
 		Mode:      config.ModeEnforce,
 		Policy:    allowOnly("*.github.com"),
@@ -291,17 +305,21 @@ func TestServeDNS_LearnsAAnswersReachableThroughCNAMEChain(t *testing.T) {
 				},
 			)
 		}),
-		Trust: captureTrustEntries(&learned),
+		Reconciler: reconciler,
 	})
 
 	_ = exchangeLocal(t, srv, question("api.github.com."))
-	if len(learned) != 1 || learned[0].IPv4.String() != "203.0.113.10" {
-		t.Fatalf("learned = %v, want one entry for 203.0.113.10", learned)
+	if len(reconciler.calls) != 1 {
+		t.Fatalf("reconciler calls = %d, want 1", len(reconciler.calls))
+	}
+	entries := reconciler.calls[0].entries
+	if len(entries) != 1 || entries[0].IPv4.String() != "203.0.113.10" {
+		t.Fatalf("reconciled entries = %v, want one entry for 203.0.113.10", entries)
 	}
 }
 
 func TestServeDNS_DoesNotLearnFromNonSuccessResponses(t *testing.T) {
-	var learned []ebpf.TrustEntry
+	reconciler := &reconcileCapture{}
 	srv := New(ServerConfig{
 		Mode:      config.ModeEnforce,
 		Policy:    allowOnly("*.github.com"),
@@ -319,47 +337,47 @@ func TestServeDNS_DoesNotLearnFromNonSuccessResponses(t *testing.T) {
 			resp.Rcode = dns.RcodeNameError
 			return resp
 		}),
-		Trust: captureTrustEntries(&learned),
+		Reconciler: reconciler,
 	})
 
 	resp := exchangeLocal(t, srv, question("api.github.com."))
 	if resp.Rcode != dns.RcodeNameError {
 		t.Fatalf("Rcode = %d, want %d", resp.Rcode, dns.RcodeNameError)
 	}
-	if len(learned) != 0 {
-		t.Fatalf("learned = %v, want no entries", learned)
+	if len(reconciler.calls) != 0 {
+		t.Fatalf("reconciler calls = %d, want 0", len(reconciler.calls))
 	}
 }
 
 func TestServeDNS_DoesNotLearnWhenTrustPlanHasNoMatch(t *testing.T) {
-	var learned []ebpf.TrustEntry
+	reconciler := &reconcileCapture{}
 	srv := New(ServerConfig{
-		Mode:      config.ModeEnforce,
-		Policy:    allowOnly("*.github.com"),
-		TrustPlan: trustPlanForTests(map[string][]uint16{}),
-		Upstream:  fakeUpstreamAnswer("api.github.com.", "203.0.113.10", 60),
-		Trust:     captureTrustEntries(&learned),
+		Mode:       config.ModeEnforce,
+		Policy:     allowOnly("*.github.com"),
+		TrustPlan:  trustPlanForTests(map[string][]uint16{}),
+		Upstream:   fakeUpstreamAnswer("api.github.com.", "203.0.113.10", 60),
+		Reconciler: reconciler,
 	})
 
 	_ = exchangeLocal(t, srv, question("api.github.com."))
-	if len(learned) != 0 {
-		t.Fatalf("learned = %v, want no entries", learned)
+	if len(reconciler.calls) != 0 {
+		t.Fatalf("reconciler calls = %d, want 0", len(reconciler.calls))
 	}
 }
 
 func TestServeDNS_DoesNotLearnWhenTrustPlanReturnsEmptyPorts(t *testing.T) {
-	var learned []ebpf.TrustEntry
+	reconciler := &reconcileCapture{}
 	srv := New(ServerConfig{
-		Mode:      config.ModeEnforce,
-		Policy:    allowOnly("*.github.com"),
-		TrustPlan: trustPlanForTests(map[string][]uint16{"api.github.com": {}}),
-		Upstream:  fakeUpstreamAnswer("api.github.com.", "203.0.113.10", 60),
-		Trust:     captureTrustEntries(&learned),
+		Mode:       config.ModeEnforce,
+		Policy:     allowOnly("*.github.com"),
+		TrustPlan:  trustPlanForTests(map[string][]uint16{"api.github.com": {}}),
+		Upstream:   fakeUpstreamAnswer("api.github.com.", "203.0.113.10", 60),
+		Reconciler: reconciler,
 	})
 
 	_ = exchangeLocal(t, srv, question("api.github.com."))
-	if len(learned) != 0 {
-		t.Fatalf("learned = %v, want no entries", learned)
+	if len(reconciler.calls) != 0 {
+		t.Fatalf("reconciler calls = %d, want 0", len(reconciler.calls))
 	}
 }
 
@@ -374,7 +392,7 @@ func TestServeDNS_NormalizesSingleQuestionHostnameBeforePolicyEvaluation(t *test
 		Upstream: fakeUpstream(func(q string) *dns.Msg {
 			return replyWithRecords(question(q))
 		}),
-		Trust: noopTrustWriter{},
+		Reconciler: noopReconciler{},
 	})
 
 	req := new(dns.Msg)
@@ -406,7 +424,7 @@ func TestServeDNS_AuditDeniedLogsWouldDenyDNS(t *testing.T) {
 		Upstream: fakeUpstream(func(q string) *dns.Msg {
 			return replyWithRecords(question(q))
 		}),
-		Trust: noopTrustWriter{},
+		Reconciler: noopReconciler{},
 	})
 
 	_ = exchangeLocal(t, srv, question("example.com."))
@@ -444,7 +462,7 @@ func TestServeDNS_MalformedQuestionSetsFormErr(t *testing.T) {
 					t.Fatalf("upstream should not be called for malformed request")
 					return nil
 				}),
-				Trust: noopTrustWriter{},
+				Reconciler: noopReconciler{},
 			})
 
 			resp := exchangeLocal(t, srv, tt.req)
@@ -468,7 +486,7 @@ func TestServeDNS_UpstreamExchangeUsesTimeoutContext(t *testing.T) {
 			}
 			return replyWithRecords(question(q))
 		}),
-		Trust: noopTrustWriter{},
+		Reconciler: noopReconciler{},
 	})
 
 	_ = exchangeLocal(t, srv, question("api.github.com."))
@@ -490,8 +508,8 @@ func TestNew_NilPolicyDefaultsToDenyAllAndLogsWarning(t *testing.T) {
 			t.Fatalf("upstream should not be called for nil policy in enforce mode")
 			return nil
 		}),
-		Trust:  noopTrustWriter{},
-		Logger: logger,
+		Reconciler: noopReconciler{},
+		Logger:     logger,
 	})
 
 	resp := exchangeLocal(t, srv, question("api.github.com."))
@@ -510,7 +528,7 @@ func TestNew_NilTrustPlanDefaultsToNoop(t *testing.T) {
 		Upstream: fakeUpstream(func(q string) *dns.Msg {
 			return replyWithRecords(question(q))
 		}),
-		Trust: noopTrustWriter{},
+		Reconciler: noopReconciler{},
 	})
 
 	if srv.trustPlan == nil {
@@ -592,36 +610,6 @@ func replyWithRecords(req *dns.Msg, records ...dns.RR) *dns.Msg {
 	return resp
 }
 
-type noopTrustWriter struct{}
-
-func (noopTrustWriter) Allow(context.Context, ebpf.TrustEntry) error { return nil }
-
-type trustWriterCapture struct {
-	learned *[]string
-}
-
-func captureTrustWriter(learned *[]string) *trustWriterCapture {
-	return &trustWriterCapture{learned: learned}
-}
-
-func (w *trustWriterCapture) Allow(ctx context.Context, entry ebpf.TrustEntry) error {
-	*w.learned = append(*w.learned, entry.IPv4.String())
-	return nil
-}
-
-type trustEntryCapture struct {
-	learned *[]ebpf.TrustEntry
-}
-
-func captureTrustEntries(learned *[]ebpf.TrustEntry) *trustEntryCapture {
-	return &trustEntryCapture{learned: learned}
-}
-
-func (w *trustEntryCapture) Allow(ctx context.Context, entry ebpf.TrustEntry) error {
-	*w.learned = append(*w.learned, entry)
-	return nil
-}
-
 type trustPlanStub struct {
 	portsByHost map[string][]uint16
 }
@@ -638,15 +626,9 @@ func (p *trustPlanStub) PortsForHost(host string) ([]uint16, bool) {
 	return ports, true
 }
 
-type failTrustWriter struct {
-	t *testing.T
-}
+type noopReconciler struct{}
 
-func (w failTrustWriter) Allow(context.Context, ebpf.TrustEntry) error {
-	w.t.Helper()
-	w.t.Fatalf("unexpected direct trust writer Allow call")
-	return nil
-}
+func (noopReconciler) ReconcileHost(context.Context, string, []ebpf.TrustEntry) error { return nil }
 
 type reconcileCall struct {
 	host    string
@@ -669,7 +651,7 @@ func (c *reconcileCapture) ReconcileHost(ctx context.Context, host string, entri
 func entryKeySet(entries []ebpf.TrustEntry) map[string]struct{} {
 	keys := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
-		keys[entry.IPv4.String()+":"+itoa(uint64(entry.Port))] = struct{}{}
+		keys[entry.IPv4.String()+":"+strconv.Itoa(int(entry.Port))] = struct{}{}
 	}
 	return keys
 }
@@ -684,10 +666,6 @@ func equalKeySet(got, want map[string]struct{}) bool {
 		}
 	}
 	return true
-}
-
-func itoa(v uint64) string {
-	return fmt.Sprintf("%d", v)
 }
 
 type responseRecorder struct {

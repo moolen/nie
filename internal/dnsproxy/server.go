@@ -28,7 +28,6 @@ type ServerConfig struct {
 	Reconciler interface {
 		ReconcileHost(context.Context, string, []ebpf.TrustEntry) error
 	}
-	Trust  ebpf.TrustWriter
 	MaxTTL time.Duration
 	Logger *slog.Logger
 }
@@ -46,23 +45,6 @@ type Server struct {
 	maxTTL  time.Duration
 	logger  *slog.Logger
 	timeout time.Duration
-}
-
-type noopTrustWriterImpl struct{}
-
-func (noopTrustWriterImpl) Allow(context.Context, ebpf.TrustEntry) error { return nil }
-
-type trustWriterReconciler struct {
-	writer ebpf.TrustWriter
-}
-
-func (r trustWriterReconciler) ReconcileHost(ctx context.Context, _ string, entries []ebpf.TrustEntry) error {
-	for _, entry := range entries {
-		if err := r.writer.Allow(ctx, entry); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 type denyAllPolicy struct{}
@@ -99,12 +81,7 @@ func New(cfg ServerConfig) *Server {
 	}
 	reconciler := cfg.Reconciler
 	if reconciler == nil {
-		tw := cfg.Trust
-		if tw == nil {
-			reconciler = noopReconcilerImpl{}
-		} else {
-			reconciler = trustWriterReconciler{writer: tw}
-		}
+		reconciler = noopReconcilerImpl{}
 	}
 
 	return &Server{

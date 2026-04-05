@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -334,12 +335,14 @@ func (f *fakeDNSServer) ShutdownContext(context.Context) error {
 	return f.stopErr
 }
 
-func TestBuildComponentsUsesLiveTrustWriter(t *testing.T) {
+func TestBuildComponentsUsesLiveTrustReconciler(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := testConfig(t)
 	manager := &fakeEBPFManager{}
 
-	var capturedTrust ebpf.TrustWriter
+	var capturedReconciler interface {
+		ReconcileHost(context.Context, string, []ebpf.TrustEntry) error
+	}
 	builders := componentBuilders{
 		newPolicy:         func([]string) (policyAllows, error) { return allowAllPolicy{}, nil },
 		validateInterface: func(string) error { return nil },
@@ -350,7 +353,7 @@ func TestBuildComponentsUsesLiveTrustWriter(t *testing.T) {
 			return &fakeLifecycle{}, nil
 		},
 		newDNSProxy: func(cfg dnsProxyConfig) dns.Handler {
-			capturedTrust = cfg.Trust
+			capturedReconciler = cfg.Reconciler
 			return dns.HandlerFunc(func(dns.ResponseWriter, *dns.Msg) {})
 		},
 		newDNSLifecycle: func(string, dns.Handler) runtime.Lifecycle {
@@ -364,19 +367,20 @@ func TestBuildComponentsUsesLiveTrustWriter(t *testing.T) {
 	if _, err := buildComponents(cfg, logger, builders); err != nil {
 		t.Fatalf("buildComponents() error = %v", err)
 	}
-	if capturedTrust == nil {
-		t.Fatal("buildComponents() passed nil trust writer")
+	if capturedReconciler == nil {
+		t.Fatal("buildComponents() passed nil trust reconciler")
 	}
 
 	entry := ebpf.TrustEntry{
 		IPv4:      netip.MustParseAddr("127.0.0.1"),
+		Port:      443,
 		ExpiresAt: time.Now().Add(time.Minute),
 	}
 
 	first := &captureTrustWriter{}
 	manager.writer = first
-	if err := capturedTrust.Allow(context.Background(), entry); err != nil {
-		t.Fatalf("capturedTrust.Allow() with first writer error = %v", err)
+	if err := capturedReconciler.ReconcileHost(context.Background(), "api.github.com", []ebpf.TrustEntry{entry}); err != nil {
+		t.Fatalf("capturedReconciler.ReconcileHost() with first writer error = %v", err)
 	}
 	if first.calls != 1 {
 		t.Fatalf("first.calls = %d, want 1", first.calls)
@@ -384,14 +388,20 @@ func TestBuildComponentsUsesLiveTrustWriter(t *testing.T) {
 
 	second := &captureTrustWriter{}
 	manager.writer = second
-	if err := capturedTrust.Allow(context.Background(), entry); err != nil {
-		t.Fatalf("capturedTrust.Allow() with second writer error = %v", err)
+	if err := capturedReconciler.ReconcileHost(context.Background(), "api.github.com", []ebpf.TrustEntry{entry}); err != nil {
+		t.Fatalf("capturedReconciler.ReconcileHost() with second writer error = %v", err)
 	}
 	if second.calls != 1 {
 		t.Fatalf("second.calls = %d, want 1", second.calls)
 	}
 	if first.calls != 1 {
 		t.Fatalf("first.calls after swap = %d, want 1", first.calls)
+	}
+}
+
+func TestDNSProxyConfigDoesNotExposeDirectTrustWriter(t *testing.T) {
+	if _, ok := reflect.TypeOf(dnsProxyConfig{}).FieldByName("Trust"); ok {
+		t.Fatal("dnsProxyConfig unexpectedly exposes Trust writer field")
 	}
 }
 

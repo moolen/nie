@@ -45,20 +45,6 @@ type componentBuilders struct {
 	validateInterface  func(iface string) error
 }
 
-type liveTrustWriter struct {
-	source interface {
-		TrustWriter() (ebpf.TrustWriter, error)
-	}
-}
-
-func (w liveTrustWriter) Allow(ctx context.Context, entry ebpf.TrustEntry) error {
-	writer, err := w.source.TrustWriter()
-	if err != nil {
-		return err
-	}
-	return writer.Allow(ctx, entry)
-}
-
 type liveTrustReconciler struct {
 	source interface {
 		TrustWriter() (ebpf.TrustWriter, error)
@@ -191,7 +177,6 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 		TrustPlan:  trustPlan,
 		Upstream:   upstream,
 		Reconciler: trustReconciler,
-		Trust:      liveTrustWriter{source: ebpfMgr},
 		Logger:     logger,
 	})
 	dnsLC := builders.newDNSLifecycle(cfg.DNS.Listen, dnsHandler)

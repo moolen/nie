@@ -71,8 +71,40 @@ type HTTPSMITMRule struct {
 }
 
 type Trust struct {
-	MaxStaleHold time.Duration `yaml:"max_stale_hold"`
+	MaxStaleHold  time.Duration `yaml:"max_stale_hold"`
 	SweepInterval time.Duration `yaml:"sweep_interval"`
+}
+
+func (t *Trust) UnmarshalYAML(value *yaml.Node) error {
+	*t = Trust{}
+	if value.Tag == "!!null" {
+		return nil
+	}
+	if value.Kind != yaml.MappingNode {
+		return errors.New("trust must be a mapping")
+	}
+	for i := 0; i < len(value.Content); i += 2 {
+		keyNode := value.Content[i]
+		valueNode := value.Content[i+1]
+
+		switch keyNode.Value {
+		case "max_stale_hold":
+			duration, err := parseDurationNode(valueNode, "trust.max_stale_hold")
+			if err != nil {
+				return err
+			}
+			t.MaxStaleHold = duration
+		case "sweep_interval":
+			duration, err := parseDurationNode(valueNode, "trust.sweep_interval")
+			if err != nil {
+				return err
+			}
+			t.SweepInterval = duration
+		default:
+			return fmt.Errorf("field %s not found in type config.Trust", keyNode.Value)
+		}
+	}
+	return nil
 }
 
 var ErrEmptyConfig = errors.New("config is empty")
@@ -268,4 +300,22 @@ func validateHostPort(field, value string) error {
 		return fmt.Errorf("%s value %q has out-of-range port %d (must be 1-65535)", field, value, port)
 	}
 	return nil
+}
+
+func parseDurationNode(node *yaml.Node, field string) (time.Duration, error) {
+	if node.Tag == "!!null" {
+		return 0, nil
+	}
+
+	var raw string
+	if err := node.Decode(&raw); err != nil {
+		return 0, fmt.Errorf("%s must be a valid duration: %w", field, err)
+	}
+
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a valid duration: %w", field, err)
+	}
+
+	return duration, nil
 }

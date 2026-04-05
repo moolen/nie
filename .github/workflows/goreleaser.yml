@@ -1,0 +1,45 @@
+name: GoReleaser
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Wait for GitHub release to exist for this tag
+        run: |
+          for attempt in {1..30}; do
+            if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+              echo "GitHub release for tag ${GITHUB_REF_NAME} is available."
+              exit 0
+            fi
+
+            echo "Waiting for GitHub release for tag ${GITHUB_REF_NAME} (attempt ${attempt}/30)..."
+            sleep 10
+          done
+
+          echo "Timed out waiting for GitHub release for tag ${GITHUB_REF_NAME}."
+          exit 1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

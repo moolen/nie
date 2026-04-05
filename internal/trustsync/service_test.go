@@ -381,6 +381,39 @@ func TestPruneStaleRefreshesDestinationWhenRetainedByActiveConntrack(t *testing.
 	}
 }
 
+func TestPruneStaleRefreshesRetainedDestinationWithMinimumFutureExpiry(t *testing.T) {
+	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	conntrack := newFakeConntrackInspector()
+	refresher := newFakeDestinationRefresher()
+	svc := New(ServiceConfig{
+		MaxStaleHold:  0,
+		SweepInterval: 1 * time.Nanosecond,
+		Now:           clock,
+		Conntrack:     conntrack,
+		Refresher:     refresher,
+	})
+
+	dst := mustDestinationWithProtocol(t, "203.0.113.52", 443, ProtocolTCP)
+	conntrack.activeByDestination[dst] = true
+
+	svc.ReplaceHostAnswers("api.example.com", []Destination{dst})
+	now = now.Add(10 * time.Second)
+	svc.ReplaceHostAnswers("api.example.com", nil)
+	refresher.calls = nil
+
+	pruned := svc.PruneStale()
+	if len(pruned) != 0 {
+		t.Fatalf("PruneStale() pruned %v, want none while conntrack active", pruned)
+	}
+	if len(refresher.calls) != 1 {
+		t.Fatalf("refresher calls = %v, want one call", refresher.calls)
+	}
+	if got, want := refresher.calls[0].expiresAt, now.Add(minRetainedRefreshTTL); !got.Equal(want) {
+		t.Fatalf("refresher expiresAt = %v, want %v", got, want)
+	}
+}
+
 func assertState(t *testing.T, svc *Service, dst Destination, want AggregateState) {
 	t.Helper()
 	got, ok := svc.State(dst)

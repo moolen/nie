@@ -65,6 +65,7 @@ type Service struct {
 }
 
 const defaultSweepInterval = 30 * time.Second
+const minRetainedRefreshTTL = 1 * time.Second
 
 func New(cfg ServiceConfig) *Service {
 	now := cfg.Now
@@ -288,7 +289,11 @@ func (s *Service) refreshRetainedLocked(ctx context.Context, now time.Time, dest
 		return
 	}
 
-	expiresAt := now.Add(s.sweepInterval * 2)
+	refreshTTL := s.sweepInterval * 2
+	if refreshTTL < minRetainedRefreshTTL {
+		refreshTTL = minRetainedRefreshTTL
+	}
+	expiresAt := now.Add(refreshTTL)
 	seen := make(map[Destination]struct{}, len(destinations))
 	for _, dst := range destinations {
 		if _, ok := seen[dst]; ok {

@@ -3,6 +3,7 @@ package dnsproxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -536,6 +537,36 @@ func TestNew_NilTrustPlanDefaultsToNoop(t *testing.T) {
 	}
 }
 
+func TestServeDNS_ReconcilerErrorIsLogged(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	boom := errors.New("reconcile failed")
+
+	srv := New(ServerConfig{
+		Mode:   config.ModeAudit,
+		Policy: allowOnly("*.github.com"),
+		TrustPlan: trustPlanForTests(map[string][]uint16{
+			"api.github.com": {443},
+		}),
+		Upstream: fakeUpstreamAnswer("api.github.com.", "203.0.113.10", 60),
+		Reconciler: reconcileErrorFunc(func(context.Context, string, []ebpf.TrustEntry) error {
+			return boom
+		}),
+		Logger: logger,
+	})
+
+	resp := exchangeLocal(t, srv, question("api.github.com."))
+	if len(resp.Answer) != 1 {
+		t.Fatalf("answer=%v, want 1 record", resp.Answer)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("reconcile_dns_trust")) {
+		t.Fatalf("log output %q does not contain reconcile_dns_trust", buf.String())
+	}
+	if !bytes.Contains(buf.Bytes(), []byte(boom.Error())) {
+		t.Fatalf("log output %q does not contain %q", buf.String(), boom.Error())
+	}
+}
+
 func allowOnly(patterns ...string) interface{ Allows(string) bool } {
 	eng, err := policy.New(patterns)
 	if err != nil {
@@ -629,6 +660,12 @@ func (p *trustPlanStub) PortsForHost(host string) ([]uint16, bool) {
 type noopReconciler struct{}
 
 func (noopReconciler) ReconcileHost(context.Context, string, []ebpf.TrustEntry) error { return nil }
+
+type reconcileErrorFunc func(context.Context, string, []ebpf.TrustEntry) error
+
+func (f reconcileErrorFunc) ReconcileHost(ctx context.Context, host string, entries []ebpf.TrustEntry) error {
+	return f(ctx, host, entries)
+}
 
 type reconcileCall struct {
 	host    string

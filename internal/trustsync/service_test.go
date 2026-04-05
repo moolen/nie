@@ -1,6 +1,7 @@
 package trustsync
 
 import (
+	"context"
 	"errors"
 	"net/netip"
 	"testing"
@@ -251,6 +252,69 @@ func TestPruneStaleSkipsTCPDestinationWhenConntrackErrors(t *testing.T) {
 	})
 }
 
+func TestPruneStaleDeletesThroughConfiguredDeleter(t *testing.T) {
+	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	deleter := newFakeDestinationDeleter()
+	svc := New(ServiceConfig{
+		MaxStaleHold: 1 * time.Minute,
+		Now:          clock,
+		Conntrack:    newFakeConntrackInspector(),
+		Deleter:      deleter,
+	})
+
+	dst := mustDestinationWithProtocol(t, "203.0.113.40", 443, ProtocolTCP)
+
+	svc.ReplaceHostAnswers("api.example.com", []Destination{dst})
+	now = now.Add(10 * time.Second)
+	svc.ReplaceHostAnswers("api.example.com", nil)
+
+	now = now.Add(2 * time.Minute)
+	pruned := svc.PruneStale()
+	if len(pruned) != 1 || pruned[0] != dst {
+		t.Fatalf("PruneStale() = %v, want [%v]", pruned, dst)
+	}
+	if len(deleter.calls) != 1 || deleter.calls[0] != dst {
+		t.Fatalf("deleter calls = %v, want [%v]", deleter.calls, dst)
+	}
+	if _, ok := svc.State(dst); ok {
+		t.Fatalf("State(%v) present after successful delete, want absent", dst)
+	}
+}
+
+func TestPruneStaleKeepsStateWhenDeleterFails(t *testing.T) {
+	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	deleter := newFakeDestinationDeleter()
+	svc := New(ServiceConfig{
+		MaxStaleHold: 1 * time.Minute,
+		Now:          clock,
+		Conntrack:    newFakeConntrackInspector(),
+		Deleter:      deleter,
+	})
+
+	dst := mustDestinationWithProtocol(t, "203.0.113.41", 443, ProtocolTCP)
+	deleter.errByDestination[dst] = errors.New("delete failed")
+
+	svc.ReplaceHostAnswers("api.example.com", []Destination{dst})
+	now = now.Add(10 * time.Second)
+	svc.ReplaceHostAnswers("api.example.com", nil)
+
+	now = now.Add(2 * time.Minute)
+	pruned := svc.PruneStale()
+	if len(pruned) != 0 {
+		t.Fatalf("PruneStale() = %v, want no successful prunes on delete failure", pruned)
+	}
+	if len(deleter.calls) != 1 || deleter.calls[0] != dst {
+		t.Fatalf("deleter calls = %v, want [%v]", deleter.calls, dst)
+	}
+	assertState(t, svc, dst, AggregateState{
+		RefCount:   0,
+		Stale:      true,
+		StaleSince: time.Date(2026, 4, 5, 12, 0, 10, 0, time.UTC),
+	})
+}
+
 func assertState(t *testing.T, svc *Service, dst Destination, want AggregateState) {
 	t.Helper()
 	got, ok := svc.State(dst)
@@ -309,4 +373,23 @@ func (f *fakeConntrackInspector) HasActiveTCPFlow(dst Destination) (bool, error)
 		return false, err
 	}
 	return f.activeByDestination[dst], nil
+}
+
+type fakeDestinationDeleter struct {
+	errByDestination map[Destination]error
+	calls            []Destination
+}
+
+func newFakeDestinationDeleter() *fakeDestinationDeleter {
+	return &fakeDestinationDeleter{
+		errByDestination: map[Destination]error{},
+	}
+}
+
+func (f *fakeDestinationDeleter) DeleteDestination(_ context.Context, dst Destination) error {
+	f.calls = append(f.calls, dst)
+	if err := f.errByDestination[dst]; err != nil {
+		return err
+	}
+	return nil
 }

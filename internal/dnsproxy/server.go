@@ -196,7 +196,9 @@ func (s *Server) learnARecords(host string, resp *dns.Msg) {
 		}
 	}
 
-	_ = s.reconciler.ReconcileHost(ctx, host, entries)
+	if err := s.reconciler.ReconcileHost(ctx, host, entries); err != nil {
+		s.logger.Warn("reconcile_dns_trust", "host", host, "err", err)
+	}
 }
 
 func acceptedAnswerNames(host string, answers []dns.RR) map[string]struct{} {

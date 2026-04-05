@@ -54,15 +54,22 @@ type liveTrustReconciler struct {
 	}
 }
 
+type liveTrustDeleter struct {
+	source interface {
+		TrustWriter() (ebpf.TrustWriter, error)
+	}
+}
+
 func (r liveTrustReconciler) ReconcileHost(ctx context.Context, host string, entries []ebpf.TrustEntry) error {
 	writer, err := r.source.TrustWriter()
 	if err != nil {
 		return err
 	}
 	destinations := make([]trustsync.Destination, 0, len(entries))
+	var firstErr error
 	for _, entry := range entries {
-		if err := writer.Allow(ctx, entry); err != nil {
-			return err
+		if err := writer.Allow(ctx, entry); err != nil && firstErr == nil {
+			firstErr = err
 		}
 		destinations = append(destinations, trustsync.Destination{
 			IP:       entry.IPv4,
@@ -71,7 +78,19 @@ func (r liveTrustReconciler) ReconcileHost(ctx context.Context, host string, ent
 		})
 	}
 	r.sync.ReconcileHostAnswers(host, destinations)
-	return nil
+	return firstErr
+}
+
+func (d liveTrustDeleter) DeleteDestination(ctx context.Context, dst trustsync.Destination) error {
+	writer, err := d.source.TrustWriter()
+	if err != nil {
+		return err
+	}
+	deleter, ok := writer.(ebpf.TrustDeleter)
+	if !ok {
+		return fmt.Errorf("trust writer does not support delete")
+	}
+	return deleter.Delete(ctx, dst.IP, dst.Port)
 }
 
 func buildComponents(cfg config.Config, logger *slog.Logger, builders componentBuilders) (runtime.Service, error) {
@@ -114,7 +133,9 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("build dns trust plan: %w", err)
 	}
-	trustService := trustsync.New(trustsync.ServiceConfig{})
+	trustService := trustsync.New(trustsync.ServiceConfig{
+		Deleter: liveTrustDeleter{source: ebpfMgr},
+	})
 	trustReconciler := liveTrustReconciler{
 		source: ebpfMgr,
 		sync:   trustService,

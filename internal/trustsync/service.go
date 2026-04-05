@@ -32,11 +32,16 @@ type ConntrackInspector interface {
 	HasActiveTCPFlow(dst Destination) (bool, error)
 }
 
+type DestinationDeleter interface {
+	DeleteDestination(context.Context, Destination) error
+}
+
 type ServiceConfig struct {
 	MaxStaleHold  time.Duration
 	SweepInterval time.Duration
 	Now           func() time.Time
 	Conntrack     ConntrackInspector
+	Deleter       DestinationDeleter
 }
 
 type Service struct {
@@ -44,6 +49,7 @@ type Service struct {
 	sweepInterval time.Duration
 	now           func() time.Time
 	conntrack     ConntrackInspector
+	deleter       DestinationDeleter
 
 	mu           sync.Mutex
 	hostLeases   map[string]map[Destination]struct{}
@@ -73,6 +79,7 @@ func New(cfg ServiceConfig) *Service {
 		sweepInterval: sweepInterval,
 		now:           now,
 		conntrack:     conntrack,
+		deleter:       cfg.Deleter,
 		hostLeases:    make(map[string]map[Destination]struct{}),
 		destinations:  make(map[Destination]AggregateState),
 	}
@@ -126,7 +133,7 @@ func (s *Service) runPruner(ctx context.Context, done chan struct{}) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.PruneStale()
+			s.pruneStale(ctx)
 		}
 	}
 }
@@ -169,9 +176,13 @@ func (s *Service) ReconcileHostAnswers(host string, destinations []Destination) 
 }
 
 func (s *Service) PruneStale() []Destination {
+	return s.pruneStale(context.Background())
+}
+
+func (s *Service) pruneStale(ctx context.Context) []Destination {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.pruneStaleLocked(s.now())
+	return s.pruneStaleLocked(ctx, s.now())
 }
 
 func (s *Service) State(dst Destination) (AggregateState, bool) {
@@ -210,7 +221,7 @@ func (s *Service) decrementRefLocked(dst Destination, now time.Time) {
 	s.destinations[dst] = state
 }
 
-func (s *Service) pruneStaleLocked(now time.Time) []Destination {
+func (s *Service) pruneStaleLocked(ctx context.Context, now time.Time) []Destination {
 	var pruned []Destination
 
 	for dst, state := range s.destinations {
@@ -226,6 +237,11 @@ func (s *Service) pruneStaleLocked(now time.Time) []Destination {
 				continue
 			}
 			if active {
+				continue
+			}
+		}
+		if s.deleter != nil {
+			if err := s.deleter.DeleteDestination(ctx, dst); err != nil {
 				continue
 			}
 		}

@@ -29,7 +29,17 @@ import (
 const (
 	spectreRepoURL   = "https://github.com/moolen/spectre"
 	spectrePinnedRev = "e49f8e0899616842cff5441bc4d9ee10c0667f20"
+	nieRootCAPath    = "/var/lib/nie/ca/root.crt"
 )
+
+var spectreRequiredDomains = []string{
+	"auth.docker.io",
+	"registry-1.docker.io",
+	"registry.npmjs.org",
+	"proxy.golang.org",
+	"sum.golang.org",
+	"dl-cdn.alpinelinux.org",
+}
 
 func TestSmoke_AuditModeAllowsUnknownTrafficButEmitsWouldDeny(t *testing.T) {
 	if os.Geteuid() != 0 {
@@ -380,6 +390,98 @@ func TestSmoke_EnforceKeepsActiveTCPFlowAcrossDNSRotationAndEventuallyPrunesStal
 	waitForNieRedirectStateAfterExit(t, false)
 }
 
+func TestSmoke_AuditCapturesPinnedDockerBuildDomains(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root")
+	}
+
+	requireDockerAvailable(t)
+
+	root := repoRoot(t)
+	tmpDir := t.TempDir()
+	cleanupStaleNieRedirectState(t)
+
+	binPath := resolveNieBinary(t, root, tmpDir)
+	listenAddr := pickFreeListenAddr(t)
+	httpsListenAddr := pickFreeTCPAddr(t)
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeConfig(t, configPath, writeConfigOptions{
+		mode:            "audit",
+		iface:           defaultRouteInterface(t),
+		listenAddr:      listenAddr,
+		httpsListenAddr: httpsListenAddr,
+		upstreamAddr:    "1.1.1.1:53",
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binPath, "-config", configPath)
+	cmd.Dir = root
+
+	var logs lockedBuffer
+	cmd.Stdout = &logs
+	cmd.Stderr = &logs
+
+	waitCh := make(chan error, 1)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start nie: %v", err)
+	}
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = terminateNieProcess(cmd, waitCh, &logs)
+		}
+	})
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	waitForPinnedState(t, "/sys/fs/bpf/nie", true, waitCh, &logs)
+	waitForNieRedirectState(t, true, waitCh, &logs)
+	waitForFile(t, nieRootCAPath, waitCh, &logs)
+
+	restoreHostTrust := installHostCATrust(t, nieRootCAPath)
+	t.Cleanup(restoreHostTrust)
+
+	repoDir := checkoutPinnedSpectre(t, tmpDir)
+	patchSpectreDockerfileForSmokeTrust(t, repoDir, nieRootCAPath)
+
+	imageTag := fmt.Sprintf("nie-smoke-spectre:%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_, _ = exec.Command("docker", "rmi", "-f", imageTag).CombinedOutput()
+	})
+
+	build := exec.CommandContext(ctx, "docker", "build", "--progress=plain", "-t", imageTag, ".")
+	build.Dir = repoDir
+	build.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("docker build spectre: %v\n%s\nnie logs=%s", err, output, logs.String())
+	}
+
+	if err := terminateNieProcess(cmd, waitCh, &logs); err != nil {
+		t.Fatalf("wait for nie exit: %v; logs=%s", err, logs.String())
+	}
+	stopped = true
+
+	observed := extractAuditedDomains(logs.String())
+	missing := missingDomains(observed, spectreRequiredDomains)
+	if len(missing) != 0 {
+		t.Fatalf("missing audited domains %v; observed=%v; logs=%s", missing, sortedDomainSet(observed), logs.String())
+	}
+
+	for _, line := range findLogLinesContaining(logs.String(), "would_deny_dns") {
+		t.Logf("nie: %s", line)
+	}
+	for _, line := range findLogLinesContaining(logs.String(), "would_deny_https") {
+		t.Logf("nie: %s", line)
+	}
+	t.Logf("observed audited domains: %v", sortedDomainSet(observed))
+
+	waitForPinnedStateAfterExit(t, "/sys/fs/bpf/nie", false)
+	waitForNieRedirectStateAfterExit(t, false)
+}
+
 func TestExtractAuditedDomains(t *testing.T) {
 	logs := strings.Join([]string{
 		`time=2026-04-05T00:00:00Z level=INFO msg=would_deny_dns host=registry.npmjs.org.`,
@@ -515,6 +617,117 @@ func checkoutPinnedSpectre(t *testing.T, dir string) string {
 	}
 
 	return repoDir
+}
+
+func requireDockerAvailable(t *testing.T) {
+	t.Helper()
+
+	cmd := exec.Command("docker", "info")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("docker unavailable: %v\n%s", err, output)
+	}
+}
+
+func waitForFile(t *testing.T, path string, waitCh <-chan error, logs *lockedBuffer) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+
+		select {
+		case err := <-waitCh:
+			t.Fatalf("nie exited before file %s appeared: %v; logs=%s", path, err, logs.String())
+		default:
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for file %s; logs=%s", path, logs.String())
+}
+
+func installHostCATrust(t *testing.T, caPath string) func() {
+	t.Helper()
+
+	cert, err := os.ReadFile(caPath)
+	if err != nil {
+		t.Fatalf("read nie root ca: %v", err)
+	}
+
+	dst := "/usr/local/share/ca-certificates/nie-smoke.crt"
+	previous, readErr := os.ReadFile(dst)
+	hadPrevious := readErr == nil
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatalf("read existing host ca trust file: %v", readErr)
+	}
+
+	if err := os.WriteFile(dst, cert, 0o644); err != nil {
+		t.Fatalf("write host ca trust file: %v", err)
+	}
+	if output, err := exec.Command("update-ca-certificates").CombinedOutput(); err != nil {
+		t.Fatalf("update-ca-certificates install: %v\n%s", err, output)
+	}
+
+	return func() {
+		if hadPrevious {
+			_ = os.WriteFile(dst, previous, 0o644)
+		} else {
+			_ = os.Remove(dst)
+		}
+		_, _ = exec.Command("update-ca-certificates").CombinedOutput()
+	}
+}
+
+func patchSpectreDockerfileForSmokeTrust(t *testing.T, repoDir, caPath string) {
+	t.Helper()
+
+	cert, err := os.ReadFile(caPath)
+	if err != nil {
+		t.Fatalf("read nie root ca for dockerfile patch: %v", err)
+	}
+
+	certName := ".nie-smoke-root.crt"
+	certPath := filepath.Join(repoDir, certName)
+	if err := os.WriteFile(certPath, cert, 0o644); err != nil {
+		t.Fatalf("write spectre smoke ca file: %v", err)
+	}
+
+	dockerfilePath := filepath.Join(repoDir, "Dockerfile")
+	raw, err := os.ReadFile(dockerfilePath)
+	if err != nil {
+		t.Fatalf("read spectre Dockerfile: %v", err)
+	}
+
+	patched := string(raw)
+	replacements := map[string]string{
+		"WORKDIR /ui-build\n": "WORKDIR /ui-build\nCOPY " + certName + " /tmp/" + certName + "\nRUN cat /tmp/" + certName + " >> /etc/ssl/certs/ca-certificates.crt\n",
+		"WORKDIR /build\n":    "WORKDIR /build\nCOPY " + certName + " /tmp/" + certName + "\nRUN cat /tmp/" + certName + " >> /etc/ssl/certs/ca-certificates.crt\n",
+		"WORKDIR /app\n":      "WORKDIR /app\nCOPY " + certName + " /tmp/" + certName + "\nRUN cat /tmp/" + certName + " >> /etc/ssl/certs/ca-certificates.crt\n",
+	}
+	for needle, replacement := range replacements {
+		if !strings.Contains(patched, needle) {
+			t.Fatalf("spectre Dockerfile patch anchor %q not found", needle)
+		}
+		patched = strings.Replace(patched, needle, replacement, 1)
+	}
+
+	if err := os.WriteFile(dockerfilePath, []byte(patched), 0o644); err != nil {
+		t.Fatalf("write patched spectre Dockerfile: %v", err)
+	}
+}
+
+func missingDomains(observed map[string]struct{}, required []string) []string {
+	var missing []string
+	for _, domain := range required {
+		if _, ok := observed[domain]; !ok {
+			missing = append(missing, domain)
+		}
+	}
+	return missing
 }
 
 type lockedBuffer struct {

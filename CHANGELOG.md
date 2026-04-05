@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/moolen/nie/compare/v1.0.0...v1.0.1) (2026-04-05)
+
+
+### Bug Fixes
+
+* **ci:** publish goreleaser assets from release workflow ([0531cd0](https://github.com/moolen/nie/commit/0531cd0dd4d2f463256d092c750ac556a939564d))
+
 # 1.0.0 (2026-04-05)
 
 

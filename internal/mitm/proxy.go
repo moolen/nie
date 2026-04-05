@@ -190,6 +190,14 @@ func (p *Proxy) handleHTTP1Connection(ctx context.Context, downstream net.Conn, 
 			}
 			return fmt.Errorf("read downstream http request for %q: %w", host, err)
 		}
+		if mismatch, authority := requestAuthorityMismatch(host, req); mismatch {
+			if p.mode == config.ModeAudit {
+				p.logAuthorityMismatch(destination.Port(), host, authority, req.Method, requestPath(req))
+			} else {
+				_ = req.Body.Close()
+				return ErrHTTPSRequestDenied
+			}
+		}
 
 		action, matchedMITM := p.requestAction(host, destination.Port(), req)
 		if !p.allowAction(action) {
@@ -268,6 +276,15 @@ func (p *Proxy) handleHTTP2Connection(ctx context.Context, downstream net.Conn, 
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if mismatch, authority := requestAuthorityMismatch(host, req); mismatch {
+			if p.mode == config.ModeAudit {
+				p.logAuthorityMismatch(destination.Port(), host, authority, req.Method, requestPath(req))
+			} else {
+				http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+				return
+			}
+		}
+
 		action, matchedMITM := p.requestAction(host, destination.Port(), req)
 		if !p.allowAction(action) {
 			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
@@ -482,6 +499,35 @@ func requestPath(req *http.Request) string {
 	return req.URL.Path
 }
 
+func requestAuthorityMismatch(classifiedHost string, req *http.Request) (bool, string) {
+	authority := requestAuthority(req)
+	return normalizeAuthorityHost(authority) != classifiedHost, authority
+}
+
+func requestAuthority(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	if authority := strings.TrimSpace(req.Host); authority != "" {
+		return authority
+	}
+	if req.URL != nil {
+		return strings.TrimSpace(req.URL.Host)
+	}
+	return ""
+}
+
+func normalizeAuthorityHost(authority string) string {
+	authority = strings.TrimSpace(authority)
+	if authority == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(authority); err == nil {
+		authority = host
+	}
+	return policy.NormalizeHostname(authority)
+}
+
 func cloneUpstreamURL(src *url.URL, host string) *url.URL {
 	dst := &url.URL{
 		Scheme: "https",
@@ -547,6 +593,18 @@ func (p *Proxy) logWouldDeny(port uint16, host, method, path string, action http
 		"method", method,
 		"path", path,
 		"action", string(action),
+	)
+}
+
+func (p *Proxy) logAuthorityMismatch(port uint16, host, authority, method, path string) {
+	p.logger.Info("would_deny_https",
+		"reason", "authority_mismatch",
+		"host", host,
+		"authority", authority,
+		"port", port,
+		"method", method,
+		"path", path,
+		"action", string(httppolicy.ActionDeny),
 	)
 }
 

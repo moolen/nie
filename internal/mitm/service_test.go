@@ -3,6 +3,7 @@ package mitm
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/netip"
 	"testing"
@@ -88,6 +89,96 @@ func TestService(t *testing.T) {
 		}
 		_ = classified.Conn.Close()
 	})
+
+	t.Run("stop closes stalled pre-classification connections", func(t *testing.T) {
+		handler := &capturingHandler{classified: make(chan ClassifiedConn, 1)}
+		svc, err := NewService(ServiceConfig{
+			ListenAddr:         "127.0.0.1:0",
+			ClientHelloTimeout: 5 * time.Second,
+		}, ServiceDependencies{
+			Handler: handler,
+			OriginalDestination: func(net.Conn) (netip.AddrPort, error) {
+				return netip.MustParseAddrPort("203.0.113.10:443"), nil
+			},
+			PeekClientHello: PeekClientHello,
+		})
+		if err != nil {
+			t.Fatalf("NewService() error = %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := svc.Start(ctx); err != nil {
+			t.Fatalf("Start() error = %v", err)
+		}
+
+		clientConn, err := net.Dial("tcp", svc.listener.Addr().String())
+		if err != nil {
+			t.Fatalf("net.Dial() error = %v", err)
+		}
+		defer clientConn.Close()
+
+		stopDone := make(chan error, 1)
+		go func() {
+			stopDone <- svc.Stop(context.Background())
+		}()
+
+		select {
+		case err := <-stopDone:
+			if err != nil {
+				t.Fatalf("Stop() error = %v", err)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("Stop() blocked with stalled pre-classification connection")
+		}
+	})
+
+	t.Run("drops idle clients after client hello timeout", func(t *testing.T) {
+		handler := &capturingHandler{classified: make(chan ClassifiedConn, 1)}
+		svc, err := NewService(ServiceConfig{
+			ListenAddr:         "127.0.0.1:0",
+			ClientHelloTimeout: 50 * time.Millisecond,
+		}, ServiceDependencies{
+			Handler: handler,
+			OriginalDestination: func(net.Conn) (netip.AddrPort, error) {
+				return netip.MustParseAddrPort("203.0.113.10:443"), nil
+			},
+			PeekClientHello: PeekClientHello,
+		})
+		if err != nil {
+			t.Fatalf("NewService() error = %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := svc.Start(ctx); err != nil {
+			t.Fatalf("Start() error = %v", err)
+		}
+		defer svc.Stop(context.Background())
+
+		clientConn, err := net.Dial("tcp", svc.listener.Addr().String())
+		if err != nil {
+			t.Fatalf("net.Dial() error = %v", err)
+		}
+		defer clientConn.Close()
+
+		if err := clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+			t.Fatalf("SetReadDeadline() error = %v", err)
+		}
+		_, err = clientConn.Read(make([]byte, 1))
+		if err == nil {
+			t.Fatal("client read error = nil, want closed idle connection")
+		}
+		if !errors.Is(err, io.EOF) && !isTimeoutish(err) {
+			t.Fatalf("client read error = %v, want EOF or timeout", err)
+		}
+
+		select {
+		case classified := <-handler.classified:
+			t.Fatalf("unexpected classified connection: %+v", classified)
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
 }
 
 func waitForClassification(t *testing.T, classified <-chan ClassifiedConn) ClassifiedConn {
@@ -113,4 +204,12 @@ func (h *capturingHandler) HandleClassifiedConnection(_ context.Context, conn Cl
 	default:
 		return errors.New("classification channel is full")
 	}
+}
+
+func isTimeoutish(err error) bool {
+	type timeout interface {
+		Timeout() bool
+	}
+	var t timeout
+	return errors.As(err, &t) && t.Timeout()
 }

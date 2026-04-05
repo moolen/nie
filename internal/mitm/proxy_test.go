@@ -253,10 +253,61 @@ func TestProxy_FallsBackToHostnamePolicyWhenNoMITMRuleMatches(t *testing.T) {
 	}
 }
 
-func TestProxy_UsesSNIInsteadOfHTTPHostHeaderForPolicy(t *testing.T) {
+func TestProxy_DeniesMismatchedHTTPHostHeaderInEnforceMode(t *testing.T) {
 	logger, _ := testLogger()
 	proxy := newTestProxy(t, testProxyOptions{
 		logger: logger,
+		mitmRules: []httppolicy.Rule{
+			{
+				Host:    "allowed.example.com",
+				Port:    443,
+				Methods: []string{"GET"},
+				Paths:   []string{"/"},
+				Action:  httppolicy.ActionAllow,
+			},
+		},
+		upstreamResponseBody: "sni-wins",
+	})
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- proxy.HandleClassifiedConnection(context.Background(), ClassifiedConn{
+			Conn:                serverConn,
+			OriginalDestination: netip.MustParseAddrPort("203.0.113.10:443"),
+			ClientHello:         ClientHello{ServerName: "allowed.example.com"},
+		})
+	}()
+
+	clientTLS := tls.Client(clientConn, &tls.Config{
+		ServerName: "allowed.example.com",
+		RootCAs:    proxy.testRootCAs(),
+		MinVersion: tls.VersionTLS12,
+	})
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatalf("clientTLS.Handshake() error = %v", err)
+	}
+	if _, err := io.WriteString(clientTLS, "GET / HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatalf("write mismatched request: %v", err)
+	}
+	_ = clientConn.Close()
+
+	err := <-done
+	if !errors.Is(err, ErrHTTPSRequestDenied) {
+		t.Fatalf("HandleClassifiedConnection() error = %v, want %v", err, ErrHTTPSRequestDenied)
+	}
+	if proxy.upstreamRequestCount() != 0 {
+		t.Fatalf("upstream request count = %d, want 0", proxy.upstreamRequestCount())
+	}
+}
+
+func TestProxy_AuditsAndForwardsMismatchedHTTPHostHeaderInAuditMode(t *testing.T) {
+	logger, logs := testLogger()
+	proxy := newTestProxy(t, testProxyOptions{
+		logger: logger,
+		mode:   config.ModeAudit,
 		mitmRules: []httppolicy.Rule{
 			{
 				Host:    "allowed.example.com",
@@ -283,6 +334,85 @@ func TestProxy_UsesSNIInsteadOfHTTPHostHeaderForPolicy(t *testing.T) {
 	}
 	if req.Host != "evil.example.com" {
 		t.Fatalf("upstream request host = %q, want original untrusted Host header preserved", req.Host)
+	}
+	if !strings.Contains(logs.String(), "would_deny_https") || !strings.Contains(logs.String(), "authority_mismatch") {
+		t.Fatalf("log output = %q, want authority mismatch audit log", logs.String())
+	}
+}
+
+func TestProxy_DeniesMismatchedHTTP2Authority(t *testing.T) {
+	logger, _ := testLogger()
+	proxy := newTestProxy(t, testProxyOptions{
+		logger: logger,
+		mitmRules: []httppolicy.Rule{
+			{
+				Host:    "api.github.com",
+				Port:    443,
+				Methods: []string{"GET"},
+				Paths:   []string{"/allowed"},
+				Action:  httppolicy.ActionAllow,
+			},
+		},
+		upstreamResponseBody: "should-not-forward",
+		upstreamHTTP2:        true,
+	})
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- proxy.HandleClassifiedConnection(context.Background(), ClassifiedConn{
+			Conn:                serverConn,
+			OriginalDestination: netip.MustParseAddrPort("203.0.113.10:443"),
+			ClientHello:         ClientHello{ServerName: "api.github.com"},
+		})
+	}()
+
+	clientTLS := tls.Client(clientConn, &tls.Config{
+		ServerName: "api.github.com",
+		RootCAs:    proxy.testRootCAs(),
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"h2"},
+	})
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatalf("clientTLS.Handshake() error = %v", err)
+	}
+	if got := clientTLS.ConnectionState().NegotiatedProtocol; got != "h2" {
+		t.Fatalf("negotiated protocol = %q, want %q", got, "h2")
+	}
+
+	h2Transport := &http2.Transport{}
+	h2Conn, err := h2Transport.NewClientConn(clientTLS)
+	if err != nil {
+		t.Fatalf("http2.Transport.NewClientConn() error = %v", err)
+	}
+	defer h2Transport.CloseIdleConnections()
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.github.com/allowed", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	req.Host = "evil.example.com"
+
+	resp, err := h2Conn.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("response status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	_ = resp.Body.Close()
+
+	select {
+	case upstreamReq := <-proxy.upstream.requests:
+		t.Fatalf("unexpected upstream request: %s %s host=%s", upstreamReq.Method, requestPath(upstreamReq), upstreamReq.Host)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	_ = clientConn.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("HandleClassifiedConnection() error = %v", err)
 	}
 }
 

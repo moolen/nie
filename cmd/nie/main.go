@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -108,6 +109,7 @@ type componentBuilders struct {
 	newDNSProxy        func(cfg dnsProxyConfig) dns.Handler
 	newDNSLifecycle    func(addr string, handler dns.Handler) runtime.Lifecycle
 	newMarkedDialer    func(mark uint32) (*net.Dialer, error)
+	validateInterface  func(iface string) error
 }
 
 type liveTrustWriter struct {
@@ -206,6 +208,9 @@ func buildComponents(cfg config.Config, logger *slog.Logger, builders componentB
 
 func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders componentBuilders) (runtime.Service, ebpfManagerLifecycle, error) {
 	builders = builders.withDefaults(logger)
+	if err := builders.validateInterface(cfg.Interface); err != nil {
+		return runtime.Service{}, nil, fmt.Errorf("validate protected interface: %w", err)
+	}
 
 	p, err := builders.newPolicy(cfg.Policy.Allow)
 	if err != nil {
@@ -409,7 +414,47 @@ func (b componentBuilders) withDefaults(logger *slog.Logger) componentBuilders {
 			return netx.NewMarkedDialer(mark)
 		}
 	}
+	if b.validateInterface == nil {
+		b.validateInterface = validateProtectedInterface
+	}
 	return b
+}
+
+func validateProtectedInterface(iface string) error {
+	netIf, err := net.InterfaceByName(iface)
+	if err != nil {
+		return fmt.Errorf("lookup interface %q: %w", iface, err)
+	}
+	addrs, err := netIf.Addrs()
+	if err != nil {
+		return fmt.Errorf("list interface %q addresses: %w", iface, err)
+	}
+	return validateProtectedInterfaceAddrs(iface, addrs)
+}
+
+func validateProtectedInterfaceAddrs(iface string, addrs []net.Addr) error {
+	for _, addr := range addrs {
+		ip, err := addrIP(addr)
+		if err != nil {
+			return fmt.Errorf("parse address %q on interface %q: %w", addr.String(), iface, err)
+		}
+		if ip == nil || ip.IsUnspecified() || ip.To4() != nil {
+			continue
+		}
+		return fmt.Errorf("interface %s has IPv6 addresses assigned (%s); nie is IPv4-only and refuses to start", iface, addr.String())
+	}
+	return nil
+}
+
+func addrIP(addr net.Addr) (net.IP, error) {
+	switch v := addr.(type) {
+	case *net.IPNet:
+		return v.IP, nil
+	case *net.IPAddr:
+		return v.IP, nil
+	default:
+		return nil, errors.New("unsupported address type")
+	}
 }
 
 func mitmTrustRules(rules []config.HTTPSMITMRule) []policy.MITMHostPortRule {

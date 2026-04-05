@@ -8,10 +8,12 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 )
 
 type ServiceConfig struct {
-	ListenAddr string
+	ListenAddr         string
+	ClientHelloTimeout time.Duration
 }
 
 type ClassifiedConn struct {
@@ -34,6 +36,7 @@ type ServiceDependencies struct {
 
 type Service struct {
 	listenAddr          string
+	clientHelloTimeout  time.Duration
 	listen              func(network, address string) (net.Listener, error)
 	originalDestination func(net.Conn) (netip.AddrPort, error)
 	peekClientHello     func(net.Conn) (BufferedConn, ClientHello, error)
@@ -42,8 +45,11 @@ type Service struct {
 	mu       sync.Mutex
 	listener net.Listener
 	started  bool
+	active   map[net.Conn]struct{}
 	wg       sync.WaitGroup
 }
+
+const defaultClientHelloTimeout = 5 * time.Second
 
 func NewService(cfg ServiceConfig, deps ServiceDependencies) (*Service, error) {
 	listenAddr := strings.TrimSpace(cfg.ListenAddr)
@@ -62,13 +68,19 @@ func NewService(cfg ServiceConfig, deps ServiceDependencies) (*Service, error) {
 	if deps.PeekClientHello == nil {
 		deps.PeekClientHello = PeekClientHello
 	}
+	clientHelloTimeout := cfg.ClientHelloTimeout
+	if clientHelloTimeout <= 0 {
+		clientHelloTimeout = defaultClientHelloTimeout
+	}
 
 	return &Service{
 		listenAddr:          listenAddr,
+		clientHelloTimeout:  clientHelloTimeout,
 		listen:              deps.Listen,
 		originalDestination: deps.OriginalDestination,
 		peekClientHello:     deps.PeekClientHello,
 		handler:             deps.Handler,
+		active:              make(map[net.Conn]struct{}),
 	}, nil
 }
 
@@ -105,6 +117,10 @@ func (s *Service) Stop(context.Context) error {
 	s.mu.Unlock()
 
 	closeErr := listener.Close()
+	active := s.activeConnections()
+	for _, conn := range active {
+		_ = conn.Close()
+	}
 	s.wg.Wait()
 	if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
 		return fmt.Errorf("close https listener: %w", closeErr)
@@ -127,16 +143,24 @@ func (s *Service) acceptLoop(ctx context.Context, listener net.Listener) {
 			}
 			return
 		}
+		if !s.trackConn(conn) {
+			_ = conn.Close()
+			return
+		}
 
 		s.wg.Add(1)
-		go func() {
+		go func(conn net.Conn) {
 			defer s.wg.Done()
+			defer s.untrackConn(conn)
 			s.handleConn(ctx, conn)
-		}()
+		}(conn)
 	}
 }
 
 func (s *Service) handleConn(ctx context.Context, conn net.Conn) {
+	if s.clientHelloTimeout > 0 {
+		_ = conn.SetDeadline(time.Now().Add(s.clientHelloTimeout))
+	}
 	originalDestination, err := s.originalDestination(conn)
 	if err != nil {
 		_ = conn.Close()
@@ -158,7 +182,36 @@ func (s *Service) handleConn(ctx context.Context, conn net.Conn) {
 		ClientHello:         hello,
 		MissingSNI:          errors.Is(err, ErrClientHelloMissingSNI),
 	}
+	_ = conn.SetDeadline(time.Time{})
 	if err := s.handler.HandleClassifiedConnection(ctx, classified); err != nil {
 		_ = classified.Conn.Close()
 	}
+}
+
+func (s *Service) trackConn(conn net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.started {
+		return false
+	}
+	s.active[conn] = struct{}{}
+	return true
+}
+
+func (s *Service) untrackConn(conn net.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.active, conn)
+}
+
+func (s *Service) activeConnections() []net.Conn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	conns := make([]net.Conn, 0, len(s.active))
+	for conn := range s.active {
+		conns = append(conns, conn)
+	}
+	return conns
 }

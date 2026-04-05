@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -113,12 +114,13 @@ func TestDNSListenerLifecycleStopContinuesAfterTCPError(t *testing.T) {
 
 func TestBuildComponentsUsesLiveTrustWriter(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	cfg := testConfig()
+	cfg := testConfig(t)
 	manager := &fakeEBPFManager{}
 
 	var capturedTrust ebpf.TrustWriter
 	builders := componentBuilders{
-		newPolicy: func([]string) (policyAllows, error) { return allowAllPolicy{}, nil },
+		newPolicy:         func([]string) (policyAllows, error) { return allowAllPolicy{}, nil },
+		validateInterface: func(string) error { return nil },
 		newEBPFManager: func(config.Config) (ebpfManagerLifecycle, error) {
 			return manager, nil
 		},
@@ -170,11 +172,12 @@ func TestBuildComponentsUsesLiveTrustWriter(t *testing.T) {
 
 func TestMainStartFailsWhenRedirectManagerCreationFails(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	cfg := testConfig()
+	cfg := testConfig(t)
 	boom := errors.New("redirect constructor boom")
 
 	builders := componentBuilders{
-		newPolicy: func([]string) (policyAllows, error) { return allowAllPolicy{}, nil },
+		newPolicy:         func([]string) (policyAllows, error) { return allowAllPolicy{}, nil },
+		validateInterface: func(string) error { return nil },
 		newEBPFManager: func(config.Config) (ebpfManagerLifecycle, error) {
 			return &fakeEBPFManager{}, nil
 		},
@@ -207,10 +210,11 @@ func TestMainStartFailsWhenRedirectManagerCreationFails(t *testing.T) {
 
 func TestBuildRuntimeService_RequiresMarkedDialer(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	cfg := testConfig()
+	cfg := testConfig(t)
 	boom := errors.New("marked dialer unavailable")
 
 	_, _, err := buildRuntimeService(cfg, logger, componentBuilders{
+		validateInterface: func(string) error { return nil },
 		newMarkedDialer: func(mark uint32) (*net.Dialer, error) {
 			if mark != uint32(cfg.DNS.Mark) {
 				t.Fatalf("newMarkedDialer() mark = %d, want %d", mark, cfg.DNS.Mark)
@@ -223,6 +227,30 @@ func TestBuildRuntimeService_RequiresMarkedDialer(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "marked dialer") {
 		t.Fatalf("buildRuntimeService() error = %q, want marked dialer context", err)
+	}
+	if !strings.Contains(err.Error(), boom.Error()) {
+		t.Fatalf("buildRuntimeService() error = %q, want wrapped %q", err, boom.Error())
+	}
+}
+
+func TestBuildRuntimeService_FailsClosedOnIPv6Interface(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := testConfig(t)
+	boom := errors.New("interface eth0 has IPv6 addresses assigned")
+
+	_, _, err := buildRuntimeService(cfg, logger, componentBuilders{
+		validateInterface: func(iface string) error {
+			if iface != cfg.Interface {
+				t.Fatalf("validateInterface() iface = %q, want %q", iface, cfg.Interface)
+			}
+			return boom
+		},
+	})
+	if err == nil {
+		t.Fatalf("buildRuntimeService() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "validate protected interface") {
+		t.Fatalf("buildRuntimeService() error = %q, want interface validation context", err)
 	}
 	if !strings.Contains(err.Error(), boom.Error()) {
 		t.Fatalf("buildRuntimeService() error = %q, want wrapped %q", err, boom.Error())
@@ -359,7 +387,10 @@ func (r *fakeAuditEventReader) Close() error {
 	return nil
 }
 
-func testConfig() config.Config {
+func testConfig(t *testing.T) config.Config {
+	t.Helper()
+
+	caDir := t.TempDir()
 	return config.Config{
 		Mode:      config.ModeEnforce,
 		Interface: "eth0",
@@ -379,8 +410,8 @@ func testConfig() config.Config {
 				Missing: "deny",
 			},
 			CA: config.HTTPSCA{
-				CertFile: "/tmp/nie-test-ca.crt",
-				KeyFile:  "/tmp/nie-test-ca.key",
+				CertFile: filepath.Join(caDir, "nie-test-ca.crt"),
+				KeyFile:  filepath.Join(caDir, "nie-test-ca.key"),
 			},
 			MITM: config.HTTPSMITM{
 				Default: "deny",

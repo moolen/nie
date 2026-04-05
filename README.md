@@ -9,6 +9,7 @@
 - IPv4 only in v1
 - classic DNS over UDP/TCP port 53 only
 - learns A records only; AAAA answers are ignored
+- refuses to start if the protected interface has IPv6 addresses assigned
 
 ## Current Status
 
@@ -114,6 +115,11 @@ allowed TCP flows to configured intercepted HTTPS ports; UDP to those ports
 still follows the existing non-HTTP deny/audit path. For non-matching non-CIDR
 traffic, `enforce` still drops by default and `audit` still allows and logs.
 
+For intercepted HTTPS, NIE classifies the TLS connection by SNI and then also
+requires the decrypted HTTP `Host` / HTTP/2 `:authority` to normalize to the
+same hostname. In `enforce`, mismatches are denied. In `audit`, they are
+forwarded but logged as `would_deny_https` with `reason=authority_mismatch`.
+
 Glob semantics:
 
 - `github.com`: exact hostname
@@ -134,6 +140,7 @@ Glob semantics:
 ## Runtime Lifecycle
 
 - eBPF startup ensures `/sys/fs/bpf` exists and mounts `bpffs` when needed, then prepares `/sys/fs/bpf/nie`, loads objects, configures mode/mark, pins maps, and attaches tc egress on the configured interface.
+- before runtime construction, `nie` validates that the protected interface is IPv4-only and fails closed if IPv6 addresses are assigned.
 - Redirect startup detects nftables availability and installs only `nie`-owned DNS redirect rules.
 - On shutdown, `nie` stops DNS first, then removes redirect rules/chains/tables it owns, detaches tc egress, closes objects, removes pinned state under `/sys/fs/bpf/nie`, and removes clsact when it created it.
 - If conflicting preexisting `nie` redirect objects are present, startup/shutdown surfaces explicit errors instead of mutating unknown state.

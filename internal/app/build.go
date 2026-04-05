@@ -134,7 +134,9 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 		return runtime.Service{}, nil, fmt.Errorf("build dns trust plan: %w", err)
 	}
 	trustService := trustsync.New(trustsync.ServiceConfig{
-		Deleter: liveTrustDeleter{source: ebpfMgr},
+		MaxStaleHold:  cfg.Trust.MaxStaleHold,
+		SweepInterval: cfg.Trust.SweepInterval,
+		Deleter:       liveTrustDeleter{source: ebpfMgr},
 	})
 	trustReconciler := liveTrustReconciler{
 		source: ebpfMgr,

@@ -65,6 +65,30 @@ func TestPeekClientHelloPreservesBytes(t *testing.T) {
 	}
 }
 
+func TestPeekClientHelloWithLimitRejectsOversizedClientHello(t *testing.T) {
+	record := captureClientHelloRecord(t, "api.github.com")
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	writeErr := make(chan error, 1)
+	go func() {
+		_, err := clientConn.Write(record)
+		_ = clientConn.Close()
+		writeErr <- err
+		close(writeErr)
+	}()
+
+	_, _, err := PeekClientHelloWithLimit(serverConn, len(record)-1)
+	if !errors.Is(err, ErrClientHelloTooLarge) {
+		t.Fatalf("PeekClientHelloWithLimit() error = %v, want %v", err, ErrClientHelloTooLarge)
+	}
+	if err := <-writeErr; err != nil {
+		t.Fatalf("client write error = %v", err)
+	}
+}
+
 func captureClientHelloRecord(t *testing.T, serverName string) []byte {
 	t.Helper()
 

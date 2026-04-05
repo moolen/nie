@@ -94,7 +94,7 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 		return runtime.Service{}, nil, fmt.Errorf("build redirect manager: %w", err)
 	}
 
-	trustPlan, err := policy.NewTrustPlan(cfg.Policy.Allow, mitmTrustRules(cfg.HTTPS.MITM.Rules))
+	trustPlan, err := policy.NewTrustPlan(cfg.Policy.Allow, httpsTrustedPorts(cfg.HTTPS.Ports), mitmTrustRules(cfg.HTTPS.MITM.Rules))
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("build dns trust plan: %w", err)
 	}
@@ -255,6 +255,17 @@ func mitmHTTPRules(rules []config.HTTPSMITMRule) []httppolicy.Rule {
 			Paths:   append([]string(nil), rule.Paths...),
 			Action:  httppolicy.Action(rule.Action),
 		})
+	}
+	return out
+}
+
+func httpsTrustedPorts(ports []int) []uint16 {
+	out := make([]uint16, 0, len(ports))
+	for _, port := range ports {
+		if port <= 0 || port > 65535 {
+			continue
+		}
+		out = append(out, uint16(port))
 	}
 	return out
 }

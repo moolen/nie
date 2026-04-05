@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -57,6 +58,9 @@ func TestRenderRulesParseableByIptablesRestore(t *testing.T) {
 	iptablesRestorePath, err := exec.LookPath("iptables-restore")
 	if err != nil {
 		t.Skip("iptables-restore not found in PATH")
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to run iptables-restore --test")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

@@ -128,6 +128,100 @@ func TestServeDNS_LearnsConfiguredPortsForMITMHost(t *testing.T) {
 	}
 }
 
+func TestServeDNS_DoesNotLearnUnrelatedAAnswers(t *testing.T) {
+	var learned []ebpf.TrustEntry
+	srv := New(ServerConfig{
+		Mode:      config.ModeEnforce,
+		Policy:    allowOnly("*.github.com"),
+		TrustPlan: trustPlanForTests(map[string][]uint16{"api.github.com": {443}}),
+		Upstream: fakeUpstream(func(q string) *dns.Msg {
+			return replyWithRecords(question(q), &dns.A{
+				Hdr: dns.RR_Header{
+					Name:   "unrelated.example.com.",
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    60,
+				},
+				A: net.ParseIP("203.0.113.10"),
+			})
+		}),
+		Trust: captureTrustEntries(&learned),
+	})
+
+	_ = exchangeLocal(t, srv, question("api.github.com."))
+	if len(learned) != 0 {
+		t.Fatalf("learned = %v, want no entries", learned)
+	}
+}
+
+func TestServeDNS_LearnsAAnswersReachableThroughCNAMEChain(t *testing.T) {
+	var learned []ebpf.TrustEntry
+	srv := New(ServerConfig{
+		Mode:      config.ModeEnforce,
+		Policy:    allowOnly("*.github.com"),
+		TrustPlan: trustPlanForTests(map[string][]uint16{"api.github.com": {443}}),
+		Upstream: fakeUpstream(func(q string) *dns.Msg {
+			return replyWithRecords(question(q),
+				&dns.CNAME{
+					Hdr: dns.RR_Header{
+						Name:   q,
+						Rrtype: dns.TypeCNAME,
+						Class:  dns.ClassINET,
+						Ttl:    60,
+					},
+					Target: "edge.github.net.",
+				},
+				&dns.A{
+					Hdr: dns.RR_Header{
+						Name:   "edge.github.net.",
+						Rrtype: dns.TypeA,
+						Class:  dns.ClassINET,
+						Ttl:    60,
+					},
+					A: net.ParseIP("203.0.113.10"),
+				},
+			)
+		}),
+		Trust: captureTrustEntries(&learned),
+	})
+
+	_ = exchangeLocal(t, srv, question("api.github.com."))
+	if len(learned) != 1 || learned[0].IPv4.String() != "203.0.113.10" {
+		t.Fatalf("learned = %v, want one entry for 203.0.113.10", learned)
+	}
+}
+
+func TestServeDNS_DoesNotLearnFromNonSuccessResponses(t *testing.T) {
+	var learned []ebpf.TrustEntry
+	srv := New(ServerConfig{
+		Mode:      config.ModeEnforce,
+		Policy:    allowOnly("*.github.com"),
+		TrustPlan: trustPlanForTests(map[string][]uint16{"api.github.com": {443}}),
+		Upstream: fakeUpstream(func(q string) *dns.Msg {
+			resp := replyWithRecords(question(q), &dns.A{
+				Hdr: dns.RR_Header{
+					Name:   q,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    60,
+				},
+				A: net.ParseIP("203.0.113.10"),
+			})
+			resp.Rcode = dns.RcodeNameError
+			return resp
+		}),
+		Trust: captureTrustEntries(&learned),
+	})
+
+	resp := exchangeLocal(t, srv, question("api.github.com."))
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("Rcode = %d, want %d", resp.Rcode, dns.RcodeNameError)
+	}
+	if len(learned) != 0 {
+		t.Fatalf("learned = %v, want no entries", learned)
+	}
+}
+
 func TestServeDNS_DoesNotLearnWhenTrustPlanHasNoMatch(t *testing.T) {
 	var learned []ebpf.TrustEntry
 	srv := New(ServerConfig{

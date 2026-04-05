@@ -11,8 +11,9 @@ type MITMHostPortRule struct {
 }
 
 type TrustPlan struct {
-	allow *Engine
-	mitm  []mitmPatternPorts
+	allow      *Engine
+	allowPorts []uint16
+	mitm       []mitmPatternPorts
 }
 
 type mitmPatternPorts struct {
@@ -20,10 +21,14 @@ type mitmPatternPorts struct {
 	ports  []uint16
 }
 
-func NewTrustPlan(allowPatterns []string, mitm []MITMHostPortRule) (*TrustPlan, error) {
+func NewTrustPlan(allowPatterns []string, allowPorts []uint16, mitm []MITMHostPortRule) (*TrustPlan, error) {
 	allowEngine, err := New(allowPatterns)
 	if err != nil {
 		return nil, err
+	}
+	allowPorts, err = uniqueSortedPorts(allowPorts)
+	if err != nil {
+		return nil, fmt.Errorf("allow ports: %w", err)
 	}
 
 	portsByHost := make(map[string]map[uint16]struct{}, len(mitm))
@@ -71,8 +76,9 @@ func NewTrustPlan(allowPatterns []string, mitm []MITMHostPortRule) (*TrustPlan, 
 	}
 
 	return &TrustPlan{
-		allow: allowEngine,
-		mitm:  matching,
+		allow:      allowEngine,
+		allowPorts: allowPorts,
+		mitm:       matching,
 	}, nil
 }
 
@@ -82,10 +88,12 @@ func (p *TrustPlan) PortsForHost(host string) ([]uint16, bool) {
 		return nil, false
 	}
 
-	if p.allow.Allows(host) {
-		return []uint16{0}, true
-	}
 	portsSet := map[uint16]struct{}{}
+	if p.allow.Allows(host) {
+		for _, port := range p.allowPorts {
+			portsSet[port] = struct{}{}
+		}
+	}
 	for _, rule := range p.mitm {
 		if !rule.engine.Allows(host) {
 			continue
@@ -104,4 +112,21 @@ func (p *TrustPlan) PortsForHost(host string) ([]uint16, bool) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out, true
+}
+
+func uniqueSortedPorts(ports []uint16) ([]uint16, error) {
+	set := make(map[uint16]struct{}, len(ports))
+	for _, port := range ports {
+		if port == 0 {
+			return nil, fmt.Errorf("port must be a positive non-zero value")
+		}
+		set[port] = struct{}{}
+	}
+
+	out := make([]uint16, 0, len(set))
+	for port := range set {
+		out = append(out, port)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
 }

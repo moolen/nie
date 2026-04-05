@@ -134,7 +134,7 @@ Glob semantics:
 3. The proxy normalizes the queried hostname and matches it against `policy.allow`.
 4. In `enforce`, denied names are answered locally with `REFUSED`.
 5. In `audit`, denied names are still forwarded upstream and logged as `would_deny_dns`.
-6. A-record answers from upstream are converted into trusted IPv4 entries for the eBPF allow map.
+6. Relevant A-record answers for the queried hostname, or for names reached through an in-answer CNAME chain, are converted into trusted IPv4 entries for the eBPF allow map only on configured intercepted HTTPS / MITM service ports.
 7. The tc egress program uses `dns.mark` as a bypass mark for proxy-originated DNS traffic.
 
 ## Runtime Lifecycle

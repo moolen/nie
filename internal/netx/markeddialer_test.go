@@ -3,12 +3,17 @@
 package netx
 
 import (
+	"os"
 	"testing"
 
 	"golang.org/x/sys/unix"
 )
 
 func TestMarkedDialer_ControlSetsSO_MARK(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to set SO_MARK")
+	}
+
 	dialer, err := NewMarkedDialer(4242)
 	if err != nil {
 		t.Fatalf("NewMarkedDialer() error = %v", err)

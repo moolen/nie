@@ -148,9 +148,16 @@ func (s *Server) learnARecords(host string, resp *dns.Msg) {
 	if resp == nil || s.trust == nil {
 		return
 	}
+	if resp.Rcode != dns.RcodeSuccess {
+		return
+	}
 
 	ports, ok := s.trustPlan.PortsForHost(host)
 	if !ok {
+		return
+	}
+	acceptedNames := acceptedAnswerNames(host, resp.Answer)
+	if len(acceptedNames) == 0 {
 		return
 	}
 
@@ -162,6 +169,9 @@ func (s *Server) learnARecords(host string, resp *dns.Msg) {
 		if !ok {
 			continue
 		}
+		if _, ok := acceptedNames[policy.NormalizeHostname(a.Hdr.Name)]; !ok {
+			continue
+		}
 
 		for _, port := range ports {
 			entry, err := ebpf.NewEntry(a.A.String(), port, rr.Header().Ttl, now, s.maxTTL)
@@ -169,6 +179,40 @@ func (s *Server) learnARecords(host string, resp *dns.Msg) {
 				continue
 			}
 			_ = s.trust.Allow(ctx, entry)
+		}
+	}
+}
+
+func acceptedAnswerNames(host string, answers []dns.RR) map[string]struct{} {
+	host = policy.NormalizeHostname(host)
+	if host == "" {
+		return nil
+	}
+
+	accepted := map[string]struct{}{host: {}}
+	for {
+		changed := false
+		for _, rr := range answers {
+			cname, ok := rr.(*dns.CNAME)
+			if !ok {
+				continue
+			}
+			name := policy.NormalizeHostname(cname.Hdr.Name)
+			if _, ok := accepted[name]; !ok {
+				continue
+			}
+			target := policy.NormalizeHostname(cname.Target)
+			if target == "" {
+				continue
+			}
+			if _, ok := accepted[target]; ok {
+				continue
+			}
+			accepted[target] = struct{}{}
+			changed = true
+		}
+		if !changed {
+			return accepted
 		}
 	}
 }

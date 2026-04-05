@@ -11,6 +11,9 @@ import (
 )
 
 var ErrClientHelloMissingSNI = errors.New("tls client hello does not include sni")
+var ErrClientHelloTooLarge = errors.New("tls client hello exceeds configured limit")
+
+const defaultClientHelloMaxBytes = 64 << 10
 
 type BufferedConn interface {
 	net.Conn
@@ -21,12 +24,19 @@ type ClientHello struct {
 }
 
 func PeekClientHello(conn net.Conn) (BufferedConn, ClientHello, error) {
+	return PeekClientHelloWithLimit(conn, defaultClientHelloMaxBytes)
+}
+
+func PeekClientHelloWithLimit(conn net.Conn, maxBytes int) (BufferedConn, ClientHello, error) {
 	if conn == nil {
 		return nil, ClientHello{}, errors.New("connection must not be nil")
 	}
+	if maxBytes <= 0 {
+		maxBytes = defaultClientHelloMaxBytes
+	}
 
 	reader := bufio.NewReader(conn)
-	recordBytes, err := readClientHelloRecords(reader)
+	recordBytes, err := readClientHelloRecords(reader, maxBytes)
 	buffered := &bufferedConn{Conn: conn, reader: reader}
 	if err != nil {
 		return buffered, ClientHello{}, err
@@ -46,12 +56,12 @@ func (c *bufferedConn) Read(p []byte) (int, error) {
 	return c.reader.Read(p)
 }
 
-func readClientHelloRecords(reader *bufio.Reader) ([]byte, error) {
+func readClientHelloRecords(reader *bufio.Reader, maxBytes int) ([]byte, error) {
 	var records bytes.Buffer
 	var handshake bytes.Buffer
 
 	for {
-		record, err := readTLSRecordBytes(reader)
+		record, err := readTLSRecordBytes(reader, maxBytes, records.Len())
 		if err != nil {
 			return nil, err
 		}
@@ -73,19 +83,25 @@ func readClientHelloRecords(reader *bufio.Reader) ([]byte, error) {
 		}
 
 		needed := 4 + int(handshakeBytes[1])<<16 + int(handshakeBytes[2])<<8 + int(handshakeBytes[3])
+		if needed > maxBytes {
+			return nil, ErrClientHelloTooLarge
+		}
 		if handshake.Len() >= needed {
 			return records.Bytes(), nil
 		}
 	}
 }
 
-func readTLSRecordBytes(reader *bufio.Reader) ([]byte, error) {
+func readTLSRecordBytes(reader *bufio.Reader, maxBytes, bufferedBytes int) ([]byte, error) {
 	header := make([]byte, 5)
 	if _, err := io.ReadFull(reader, header); err != nil {
 		return nil, fmt.Errorf("read tls record header: %w", err)
 	}
 
 	length := int(binary.BigEndian.Uint16(header[3:5]))
+	if bufferedBytes+len(header)+length > maxBytes {
+		return nil, ErrClientHelloTooLarge
+	}
 	record := make([]byte, len(header)+length)
 	copy(record, header)
 	if _, err := io.ReadFull(reader, record[len(header):]); err != nil {

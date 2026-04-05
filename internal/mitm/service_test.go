@@ -179,6 +179,56 @@ func TestService(t *testing.T) {
 		case <-time.After(100 * time.Millisecond):
 		}
 	})
+
+	t.Run("drops oversized client hello before classification", func(t *testing.T) {
+		record := captureClientHelloRecord(t, "api.github.com")
+		handler := &capturingHandler{classified: make(chan ClassifiedConn, 1)}
+		svc, err := NewService(ServiceConfig{
+			ListenAddr:          "127.0.0.1:0",
+			ClientHelloMaxBytes: len(record) - 1,
+		}, ServiceDependencies{
+			Handler: handler,
+			OriginalDestination: func(net.Conn) (netip.AddrPort, error) {
+				return netip.MustParseAddrPort("203.0.113.10:443"), nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewService() error = %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := svc.Start(ctx); err != nil {
+			t.Fatalf("Start() error = %v", err)
+		}
+		defer svc.Stop(context.Background())
+
+		clientConn, err := net.Dial("tcp", svc.listener.Addr().String())
+		if err != nil {
+			t.Fatalf("net.Dial() error = %v", err)
+		}
+		defer clientConn.Close()
+
+		if _, err := clientConn.Write(record); err != nil {
+			t.Fatalf("clientConn.Write() error = %v", err)
+		}
+		if err := clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+			t.Fatalf("SetReadDeadline() error = %v", err)
+		}
+		_, err = clientConn.Read(make([]byte, 1))
+		if err == nil {
+			t.Fatal("client read error = nil, want closed connection")
+		}
+		if !errors.Is(err, io.EOF) && !isTimeoutish(err) {
+			t.Fatalf("client read error = %v, want EOF or timeout", err)
+		}
+
+		select {
+		case classified := <-handler.classified:
+			t.Fatalf("unexpected classified connection: %+v", classified)
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
 }
 
 func waitForClassification(t *testing.T, classified <-chan ClassifiedConn) ClassifiedConn {

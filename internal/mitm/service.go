@@ -12,8 +12,9 @@ import (
 )
 
 type ServiceConfig struct {
-	ListenAddr         string
-	ClientHelloTimeout time.Duration
+	ListenAddr          string
+	ClientHelloTimeout  time.Duration
+	ClientHelloMaxBytes int
 }
 
 type ClassifiedConn struct {
@@ -65,8 +66,14 @@ func NewService(cfg ServiceConfig, deps ServiceDependencies) (*Service, error) {
 	if deps.OriginalDestination == nil {
 		deps.OriginalDestination = OriginalDestination
 	}
+	clientHelloMaxBytes := cfg.ClientHelloMaxBytes
+	if clientHelloMaxBytes <= 0 {
+		clientHelloMaxBytes = defaultClientHelloMaxBytes
+	}
 	if deps.PeekClientHello == nil {
-		deps.PeekClientHello = PeekClientHello
+		deps.PeekClientHello = func(conn net.Conn) (BufferedConn, ClientHello, error) {
+			return PeekClientHelloWithLimit(conn, clientHelloMaxBytes)
+		}
 	}
 	clientHelloTimeout := cfg.ClientHelloTimeout
 	if clientHelloTimeout <= 0 {

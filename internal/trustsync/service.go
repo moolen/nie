@@ -161,7 +161,7 @@ func (s *Service) ReplaceHostAnswers(host string, destinations []Destination) {
 		if _, stillPresent := next[dst]; stillPresent {
 			continue
 		}
-		if s.decrementRefLocked(dst, now) {
+		if s.decrementRefLocked(dst, now) && s.shouldRefreshOnStaleTransitionLocked(dst) {
 			refresh = append(refresh, dst)
 		}
 	}
@@ -253,7 +253,6 @@ func (s *Service) pruneStaleLocked(ctx context.Context, now time.Time) []Destina
 		if dst.Protocol == ProtocolTCP && s.conntrack != nil {
 			active, err := s.conntrack.HasActiveTCPFlow(dst)
 			if err != nil {
-				s.refreshRetainedLocked(ctx, now, []Destination{dst})
 				continue
 			}
 			if active {
@@ -263,7 +262,6 @@ func (s *Service) pruneStaleLocked(ctx context.Context, now time.Time) []Destina
 		}
 		if s.deleter != nil {
 			if err := s.deleter.DeleteDestination(ctx, dst); err != nil {
-				s.refreshRetainedLocked(ctx, now, []Destination{dst})
 				continue
 			}
 		}
@@ -282,6 +280,20 @@ func (s *Service) pruneStaleLocked(ctx context.Context, now time.Time) []Destina
 	})
 
 	return pruned
+}
+
+func (s *Service) shouldRefreshOnStaleTransitionLocked(dst Destination) bool {
+	if s.refresher == nil {
+		return false
+	}
+	if s.maxStaleHold > 0 {
+		return true
+	}
+	if dst.Protocol != ProtocolTCP || s.conntrack == nil {
+		return false
+	}
+	active, err := s.conntrack.HasActiveTCPFlow(dst)
+	return err == nil && active
 }
 
 func (s *Service) refreshRetainedLocked(ctx context.Context, now time.Time, destinations []Destination) {

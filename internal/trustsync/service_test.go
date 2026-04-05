@@ -227,10 +227,12 @@ func TestPruneStaleSkipsTCPDestinationWhenConntrackErrors(t *testing.T) {
 	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 	conntrack := newFakeConntrackInspector()
+	refresher := newFakeDestinationRefresher()
 	svc := New(ServiceConfig{
 		MaxStaleHold: 1 * time.Minute,
 		Now:          clock,
 		Conntrack:    conntrack,
+		Refresher:    refresher,
 	})
 
 	dst := mustDestinationWithProtocol(t, "203.0.113.30", 443, ProtocolTCP)
@@ -239,6 +241,7 @@ func TestPruneStaleSkipsTCPDestinationWhenConntrackErrors(t *testing.T) {
 	svc.ReplaceHostAnswers("api.example.com", []Destination{dst})
 	now = now.Add(10 * time.Second)
 	svc.ReplaceHostAnswers("api.example.com", nil)
+	refresher.calls = nil
 
 	now = now.Add(2 * time.Minute)
 	pruned := svc.PruneStale()
@@ -250,6 +253,9 @@ func TestPruneStaleSkipsTCPDestinationWhenConntrackErrors(t *testing.T) {
 		Stale:      true,
 		StaleSince: time.Date(2026, 4, 5, 12, 0, 10, 0, time.UTC),
 	})
+	if len(refresher.calls) != 0 {
+		t.Fatalf("refresher calls = %v, want none on conntrack error", refresher.calls)
+	}
 }
 
 func TestPruneStaleDeletesThroughConfiguredDeleter(t *testing.T) {
@@ -286,11 +292,13 @@ func TestPruneStaleKeepsStateWhenDeleterFails(t *testing.T) {
 	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 	deleter := newFakeDestinationDeleter()
+	refresher := newFakeDestinationRefresher()
 	svc := New(ServiceConfig{
 		MaxStaleHold: 1 * time.Minute,
 		Now:          clock,
 		Conntrack:    newFakeConntrackInspector(),
 		Deleter:      deleter,
+		Refresher:    refresher,
 	})
 
 	dst := mustDestinationWithProtocol(t, "203.0.113.41", 443, ProtocolTCP)
@@ -299,6 +307,7 @@ func TestPruneStaleKeepsStateWhenDeleterFails(t *testing.T) {
 	svc.ReplaceHostAnswers("api.example.com", []Destination{dst})
 	now = now.Add(10 * time.Second)
 	svc.ReplaceHostAnswers("api.example.com", nil)
+	refresher.calls = nil
 
 	now = now.Add(2 * time.Minute)
 	pruned := svc.PruneStale()
@@ -313,9 +322,12 @@ func TestPruneStaleKeepsStateWhenDeleterFails(t *testing.T) {
 		Stale:      true,
 		StaleSince: time.Date(2026, 4, 5, 12, 0, 10, 0, time.UTC),
 	})
+	if len(refresher.calls) != 0 {
+		t.Fatalf("refresher calls = %v, want none on delete failure", refresher.calls)
+	}
 }
 
-func TestReplaceHostAnswersRefreshesDestinationWhenItBecomesStale(t *testing.T) {
+func TestReplaceHostAnswersRefreshesDestinationWhenItBecomesStaleWithinConfiguredHold(t *testing.T) {
 	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 	refresher := newFakeDestinationRefresher()
@@ -341,6 +353,85 @@ func TestReplaceHostAnswersRefreshesDestinationWhenItBecomesStale(t *testing.T) 
 	}
 	if got, want := refresher.calls[0].expiresAt, now.Add(60*time.Second); !got.Equal(want) {
 		t.Fatalf("refresher expiresAt = %v, want %v", got, want)
+	}
+}
+
+func TestReplaceHostAnswersDoesNotRefreshStaleDestinationWithoutHoldOrActiveFlow(t *testing.T) {
+	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	refresher := newFakeDestinationRefresher()
+	svc := New(ServiceConfig{
+		MaxStaleHold:  0,
+		SweepInterval: 30 * time.Second,
+		Now:           clock,
+		Conntrack:     newFakeConntrackInspector(),
+		Refresher:     refresher,
+	})
+
+	dst := mustDestinationWithProtocol(t, "203.0.113.60", 443, ProtocolUDP)
+
+	svc.ReplaceHostAnswers("api.example.com", []Destination{dst})
+	now = now.Add(10 * time.Second)
+	svc.ReplaceHostAnswers("api.example.com", nil)
+
+	if len(refresher.calls) != 0 {
+		t.Fatalf("refresher calls = %v, want no refresh without hold or active flow", refresher.calls)
+	}
+}
+
+func TestReplaceHostAnswersRefreshesStaleDestinationWhenActiveTCPFlowIsConfirmed(t *testing.T) {
+	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	conntrack := newFakeConntrackInspector()
+	refresher := newFakeDestinationRefresher()
+	svc := New(ServiceConfig{
+		MaxStaleHold:  0,
+		SweepInterval: 30 * time.Second,
+		Now:           clock,
+		Conntrack:     conntrack,
+		Refresher:     refresher,
+	})
+
+	dst := mustDestinationWithProtocol(t, "203.0.113.61", 443, ProtocolTCP)
+	conntrack.activeByDestination[dst] = true
+
+	svc.ReplaceHostAnswers("api.example.com", []Destination{dst})
+	now = now.Add(10 * time.Second)
+	svc.ReplaceHostAnswers("api.example.com", nil)
+
+	if len(refresher.calls) != 1 {
+		t.Fatalf("refresher calls = %v, want one refresh for active TCP flow", refresher.calls)
+	}
+	if refresher.calls[0].dst != dst {
+		t.Fatalf("refresher dst = %v, want %v", refresher.calls[0].dst, dst)
+	}
+	if got, want := refresher.calls[0].expiresAt, now.Add(60*time.Second); !got.Equal(want) {
+		t.Fatalf("refresher expiresAt = %v, want %v", got, want)
+	}
+}
+
+func TestReplaceHostAnswersDoesNotRefreshStaleDestinationWhenConntrackLookupErrors(t *testing.T) {
+	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	conntrack := newFakeConntrackInspector()
+	refresher := newFakeDestinationRefresher()
+	svc := New(ServiceConfig{
+		MaxStaleHold:  0,
+		SweepInterval: 30 * time.Second,
+		Now:           clock,
+		Conntrack:     conntrack,
+		Refresher:     refresher,
+	})
+
+	dst := mustDestinationWithProtocol(t, "203.0.113.62", 443, ProtocolTCP)
+	conntrack.errByDestination[dst] = errors.New("conntrack unavailable")
+
+	svc.ReplaceHostAnswers("api.example.com", []Destination{dst})
+	now = now.Add(10 * time.Second)
+	svc.ReplaceHostAnswers("api.example.com", nil)
+
+	if len(refresher.calls) != 0 {
+		t.Fatalf("refresher calls = %v, want no refresh when conntrack lookup errors", refresher.calls)
 	}
 }
 

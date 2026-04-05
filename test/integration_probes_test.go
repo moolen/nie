@@ -211,6 +211,53 @@ func tcpExchangeResult(target string, timeout time.Duration) string {
 	return "success"
 }
 
+type persistentTCPEchoProbe struct {
+	conn net.Conn
+}
+
+func startPersistentTCPEchoProbe(target string, timeout time.Duration) (*persistentTCPEchoProbe, error) {
+	if target == "" {
+		return nil, fmt.Errorf("missing target")
+	}
+	conn, err := net.DialTimeout("tcp", target, timeout)
+	if err != nil {
+		return nil, err
+	}
+	probe := &persistentTCPEchoProbe{conn: conn}
+	if got := probe.Exchange(timeout); got != "success" {
+		_ = conn.Close()
+		return nil, fmt.Errorf("initial exchange = %s", got)
+	}
+	return probe, nil
+}
+
+func (p *persistentTCPEchoProbe) Exchange(timeout time.Duration) string {
+	if p == nil || p.conn == nil {
+		return "error"
+	}
+	_ = p.conn.SetDeadline(time.Now().Add(timeout))
+	if _, err := io.WriteString(p.conn, integrationProbePayload); err != nil {
+		return classifyProbeError(err)
+	}
+	buf := make([]byte, len(integrationProbePayload))
+	if _, err := io.ReadFull(p.conn, buf); err != nil {
+		return classifyProbeError(err)
+	}
+	if string(buf) != integrationProbePayload {
+		return "error"
+	}
+	return "success"
+}
+
+func (p *persistentTCPEchoProbe) Close() error {
+	if p == nil || p.conn == nil {
+		return nil
+	}
+	err := p.conn.Close()
+	p.conn = nil
+	return err
+}
+
 func udpExchangeResult(target string, timeout time.Duration) string {
 	if target == "" {
 		return "error"

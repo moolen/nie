@@ -74,7 +74,11 @@ path:
 This catches broken GoReleaser config, packaging regressions, and missing files
 before merges hit `main`.
 
-### Release Workflow
+### Release Workflows
+
+Add two workflows with explicit and separate triggers.
+
+#### 1. Semantic release workflow
 
 Add `.github/workflows/release.yml` triggered by pushes to `main`.
 
@@ -83,9 +87,8 @@ Requirements:
 - `actions/checkout` with `fetch-depth: 0`
 - repository write permissions sufficient for tags and releases
 - one job for `semantic-release`
-- one downstream tag-driven packaging path for GoReleaser
 
-Recommended shape:
+Behavior:
 
 1. `semantic-release` runs on push to `main`
 2. if no release is needed, workflow completes successfully
@@ -93,11 +96,32 @@ Recommended shape:
    - the next SemVer tag
    - GitHub Release notes/changelog
    - the GitHub Release object
-4. a GoReleaser workflow triggered by tag push publishes artifacts for that tag
 
-Using a tag-triggered GoReleaser workflow keeps packaging aligned with
-GoReleaser's native expectations and makes re-runs deterministic for a given
-tag.
+#### 2. GoReleaser publish workflow
+
+Add `.github/workflows/goreleaser.yml` triggered by version tag pushes matching
+`v*`.
+
+Requirements:
+
+- `actions/checkout` with `fetch-depth: 0`
+- permissions sufficient to upload release assets
+- the official GoReleaser GitHub Action
+
+Behavior:
+
+1. the workflow is intended for release tags created by `semantic-release`;
+   matching manually-pushed tags are unsupported but may still invoke the
+   workflow
+2. before publishing assets, the workflow waits briefly for the GitHub Release
+   for that tag to exist, then fails if it never appears
+3. GoReleaser builds artifacts for that exact tag
+4. GoReleaser uploads archives and checksums to the existing GitHub Release
+   created by `semantic-release`
+
+Using a dedicated tag-triggered GoReleaser workflow keeps packaging aligned
+with GoReleaser's native expectations and makes re-runs deterministic for a
+given tag.
 
 ## Repository Configuration
 
@@ -113,6 +137,8 @@ The configuration should:
 - generate release notes
 - publish to GitHub
 - target `main`
+- create version tags with a `v` prefix so the publish workflow trigger pattern
+  matches the release tag format
 
 The repository does not need Node-based application code, but the release
 workflow will still need a small Node environment because `semantic-release`
@@ -128,6 +154,8 @@ Add `.goreleaser.yaml` with:
 - `amd64` and `arm64` as the target architectures
 - archive packaging with stable names
 - checksum generation
+- release publishing configured so asset upload augments the GitHub Release
+  created by `semantic-release` instead of replacing its release notes
 
 Artifacts should include:
 
@@ -157,8 +185,9 @@ version declarations.
 
 ## Failure Handling
 
-- Shallow history is treated as a configuration error; workflows must fetch full
-  history.
+- Shallow history is treated as a configuration error for release-related
+  workflows and any CI job running tag- or history-sensitive release tooling.
+  Those workflows must fetch full history.
 - If `semantic-release` finds no releasable commits, the release workflow exits
   without creating tags or artifacts.
 - If `semantic-release` creates a tag/release but GoReleaser fails, the

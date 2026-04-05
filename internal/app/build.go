@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"time"
 
 	"github.com/miekg/dns"
 
@@ -60,6 +61,12 @@ type liveTrustDeleter struct {
 	}
 }
 
+type liveTrustRefresher struct {
+	source interface {
+		TrustWriter() (ebpf.TrustWriter, error)
+	}
+}
+
 func (r liveTrustReconciler) ReconcileHost(ctx context.Context, host string, entries []ebpf.TrustEntry) error {
 	writer, err := r.source.TrustWriter()
 	if err != nil {
@@ -91,6 +98,18 @@ func (d liveTrustDeleter) DeleteDestination(ctx context.Context, dst trustsync.D
 		return fmt.Errorf("trust writer does not support delete")
 	}
 	return deleter.Delete(ctx, dst.IP, dst.Port)
+}
+
+func (r liveTrustRefresher) RefreshDestination(ctx context.Context, dst trustsync.Destination, expiresAt time.Time) error {
+	writer, err := r.source.TrustWriter()
+	if err != nil {
+		return err
+	}
+	return writer.Allow(ctx, ebpf.TrustEntry{
+		IPv4:      dst.IP,
+		Port:      dst.Port,
+		ExpiresAt: expiresAt,
+	})
 }
 
 func buildComponents(cfg config.Config, logger *slog.Logger, builders componentBuilders) (runtime.Service, error) {
@@ -137,6 +156,7 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 		MaxStaleHold:  cfg.Trust.MaxStaleHold,
 		SweepInterval: cfg.Trust.SweepInterval,
 		Deleter:       liveTrustDeleter{source: ebpfMgr},
+		Refresher:     liveTrustRefresher{source: ebpfMgr},
 	})
 	trustReconciler := liveTrustReconciler{
 		source: ebpfMgr,

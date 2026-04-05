@@ -315,6 +315,72 @@ func TestPruneStaleKeepsStateWhenDeleterFails(t *testing.T) {
 	})
 }
 
+func TestReplaceHostAnswersRefreshesDestinationWhenItBecomesStale(t *testing.T) {
+	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	refresher := newFakeDestinationRefresher()
+	svc := New(ServiceConfig{
+		MaxStaleHold:  1 * time.Minute,
+		SweepInterval: 30 * time.Second,
+		Now:           clock,
+		Conntrack:     newFakeConntrackInspector(),
+		Refresher:     refresher,
+	})
+
+	dst := mustDestinationWithProtocol(t, "203.0.113.50", 443, ProtocolTCP)
+
+	svc.ReplaceHostAnswers("api.example.com", []Destination{dst})
+	now = now.Add(10 * time.Second)
+	svc.ReplaceHostAnswers("api.example.com", nil)
+
+	if len(refresher.calls) != 1 {
+		t.Fatalf("refresher calls = %v, want one call", refresher.calls)
+	}
+	if refresher.calls[0].dst != dst {
+		t.Fatalf("refresher dst = %v, want %v", refresher.calls[0].dst, dst)
+	}
+	if got, want := refresher.calls[0].expiresAt, now.Add(60*time.Second); !got.Equal(want) {
+		t.Fatalf("refresher expiresAt = %v, want %v", got, want)
+	}
+}
+
+func TestPruneStaleRefreshesDestinationWhenRetainedByActiveConntrack(t *testing.T) {
+	now := time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	conntrack := newFakeConntrackInspector()
+	refresher := newFakeDestinationRefresher()
+	svc := New(ServiceConfig{
+		MaxStaleHold:  1 * time.Minute,
+		SweepInterval: 30 * time.Second,
+		Now:           clock,
+		Conntrack:     conntrack,
+		Refresher:     refresher,
+	})
+
+	dst := mustDestinationWithProtocol(t, "203.0.113.51", 443, ProtocolTCP)
+	conntrack.activeByDestination[dst] = true
+
+	svc.ReplaceHostAnswers("api.example.com", []Destination{dst})
+	now = now.Add(10 * time.Second)
+	svc.ReplaceHostAnswers("api.example.com", nil)
+	refresher.calls = nil
+
+	now = now.Add(2 * time.Minute)
+	pruned := svc.PruneStale()
+	if len(pruned) != 0 {
+		t.Fatalf("PruneStale() pruned %v, want none while conntrack active", pruned)
+	}
+	if len(refresher.calls) != 1 {
+		t.Fatalf("refresher calls = %v, want one call", refresher.calls)
+	}
+	if refresher.calls[0].dst != dst {
+		t.Fatalf("refresher dst = %v, want %v", refresher.calls[0].dst, dst)
+	}
+	if got, want := refresher.calls[0].expiresAt, now.Add(60*time.Second); !got.Equal(want) {
+		t.Fatalf("refresher expiresAt = %v, want %v", got, want)
+	}
+}
+
 func assertState(t *testing.T, svc *Service, dst Destination, want AggregateState) {
 	t.Helper()
 	got, ok := svc.State(dst)
@@ -391,5 +457,26 @@ func (f *fakeDestinationDeleter) DeleteDestination(_ context.Context, dst Destin
 	if err := f.errByDestination[dst]; err != nil {
 		return err
 	}
+	return nil
+}
+
+type fakeDestinationRefresher struct {
+	calls []refreshCall
+}
+
+type refreshCall struct {
+	dst       Destination
+	expiresAt time.Time
+}
+
+func newFakeDestinationRefresher() *fakeDestinationRefresher {
+	return &fakeDestinationRefresher{}
+}
+
+func (f *fakeDestinationRefresher) RefreshDestination(_ context.Context, dst Destination, expiresAt time.Time) error {
+	f.calls = append(f.calls, refreshCall{
+		dst:       dst,
+		expiresAt: expiresAt,
+	})
 	return nil
 }

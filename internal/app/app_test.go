@@ -647,6 +647,73 @@ func TestBuildComponentsTrustLifecycleHonorsConfiguredCleanupTiming(t *testing.T
 	}
 }
 
+func TestBuildComponentsTrustLifecycleRefreshesRetainedStaleDestinationThroughWriter(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := testConfig(t)
+	cfg.Trust.MaxStaleHold = time.Minute
+	cfg.Trust.SweepInterval = 50 * time.Millisecond
+	manager := &fakeEBPFManager{}
+
+	var capturedReconciler interface {
+		ReconcileHost(context.Context, string, []ebpf.TrustEntry) error
+	}
+	builders := componentBuilders{
+		newPolicy:         func([]string) (policyAllows, error) { return allowAllPolicy{}, nil },
+		validateInterface: func(string) error { return nil },
+		newEBPFManager: func(config.Config) (ebpfManagerLifecycle, error) {
+			return manager, nil
+		},
+		newRedirectManager: func(config.Config) (runtime.Lifecycle, error) {
+			return &fakeLifecycle{}, nil
+		},
+		newDNSProxy: func(cfg dnsProxyConfig) dns.Handler {
+			capturedReconciler = cfg.Reconciler
+			return dns.HandlerFunc(func(dns.ResponseWriter, *dns.Msg) {})
+		},
+		newDNSLifecycle: func(string, dns.Handler) runtime.Lifecycle {
+			return &fakeLifecycle{}
+		},
+		newMarkedDialer: func(uint32) (*net.Dialer, error) {
+			return &net.Dialer{}, nil
+		},
+	}
+
+	svc, err := buildComponents(cfg, logger, builders)
+	if err != nil {
+		t.Fatalf("buildComponents() error = %v", err)
+	}
+	reconcilerImpl, ok := capturedReconciler.(liveTrustReconciler)
+	if !ok {
+		t.Fatalf("capturedReconciler type = %T, want liveTrustReconciler", capturedReconciler)
+	}
+	reconcilerSync := reconcilerImpl.sync.(*trustsync.Service)
+	if svc.Trust != reconcilerSync {
+		t.Fatal("buildComponents() did not share trust service between reconciler and lifecycle")
+	}
+
+	writer := &recordingTrustWriter{}
+	manager.writer = writer
+
+	dst := trustsync.Destination{
+		IP:       netip.MustParseAddr("127.0.0.5"),
+		Port:     443,
+		Protocol: trustsync.ProtocolUDP,
+	}
+	reconcilerSync.ReconcileHostAnswers("api.github.com", []trustsync.Destination{dst})
+	reconcilerSync.ReconcileHostAnswers("api.github.com", nil)
+
+	if writer.allowCalls != 1 {
+		t.Fatalf("writer.allowCalls = %d, want 1 refresh allow call", writer.allowCalls)
+	}
+	entry := writer.lastAllowedEntry
+	if entry.IPv4 != dst.IP || entry.Port != dst.Port {
+		t.Fatalf("writer.lastAllowedEntry = %+v, want dst %v", entry, dst)
+	}
+	if !entry.ExpiresAt.After(time.Now()) {
+		t.Fatalf("writer.lastAllowedEntry.ExpiresAt = %v, want future time", entry.ExpiresAt)
+	}
+}
+
 func TestDNSProxyConfigDoesNotExposeDirectTrustWriter(t *testing.T) {
 	if _, ok := reflect.TypeOf(dnsProxyConfig{}).FieldByName("Trust"); ok {
 		t.Fatal("dnsProxyConfig unexpectedly exposes Trust writer field")
@@ -1000,14 +1067,16 @@ func (c *captureTrustWriter) Allow(context.Context, ebpf.TrustEntry) error {
 }
 
 type recordingTrustWriter struct {
-	allowCalls    int
-	deleteCalls   int
-	allowErrByKey map[string]error
-	deleteErrByKey map[string]error
+	allowCalls       int
+	deleteCalls      int
+	lastAllowedEntry ebpf.TrustEntry
+	allowErrByKey    map[string]error
+	deleteErrByKey   map[string]error
 }
 
 func (w *recordingTrustWriter) Allow(_ context.Context, entry ebpf.TrustEntry) error {
 	w.allowCalls++
+	w.lastAllowedEntry = entry
 	if err := w.allowErrByKey[trustEntryKey(entry)]; err != nil {
 		return err
 	}

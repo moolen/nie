@@ -48,6 +48,44 @@ func TestNormalizeAddrIPv6WithoutPort(t *testing.T) {
 	}
 }
 
+func TestParsePortList(t *testing.T) {
+	got, err := parsePortList("10443,18443", []int{443, 8443})
+	if err != nil {
+		t.Fatalf("parsePortList() error = %v", err)
+	}
+	want := []int{10443, 18443}
+	if len(got) != len(want) {
+		t.Fatalf("len(parsePortList()) = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("parsePortList()[%d] = %d, want %d", i, got[i], want[i])
+		}
+	}
+}
+
+func TestParsePortListUsesDefaultsForEmptyInput(t *testing.T) {
+	got, err := parsePortList("", []int{443, 8443})
+	if err != nil {
+		t.Fatalf("parsePortList() error = %v", err)
+	}
+	want := []int{443, 8443}
+	if len(got) != len(want) {
+		t.Fatalf("len(parsePortList()) = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("parsePortList()[%d] = %d, want %d", i, got[i], want[i])
+		}
+	}
+}
+
+func TestBlockedHTTPSPhase(t *testing.T) {
+	if got := blockedHTTPSPhase(10443); got != "blocked-10443" {
+		t.Fatalf("blockedHTTPSPhase() = %q, want %q", got, "blocked-10443")
+	}
+}
+
 func TestTCPExchangeProbeSuccess(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

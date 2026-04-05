@@ -4,9 +4,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIXTURE_ADDR="${NIE_VM_FIXTURE_ADDR:-}"
 FIXTURE_PORT="${NIE_VM_FIXTURE_PORT:-18080}"
+FIXTURE_HTTPS_PORTS="${NIE_VM_FIXTURE_HTTPS_PORTS:-10443,18443}"
 ALLOWED_HOST="${NIE_VM_ALLOWED_HOST:-allowed.vm.test}"
 GUEST_PRIVATE_IP="${NIE_VM_GUEST_PRIVATE_IP:-192.168.56.10}"
 TMPDIR_ROOT="${TMPDIR:-/tmp}"
+VAGRANT_HOME_DEFAULT="${XDG_CACHE_HOME:-$HOME/.cache}/nie/vagrant"
+GO_CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/nie/go"
+
+export VAGRANT_HOME="${NIE_VAGRANT_HOME:-${VAGRANT_HOME_DEFAULT}}"
+mkdir -p "${VAGRANT_HOME}"
+export GOCACHE="${NIE_VM_GOCACHE:-${GO_CACHE_ROOT}/build}"
+export GOMODCACHE="${NIE_VM_GOMODCACHE:-${GO_CACHE_ROOT}/mod}"
+mkdir -p "${GOCACHE}" "${GOMODCACHE}"
 
 tmpdir="$(mktemp -d "${TMPDIR_ROOT}/nie-vm-tests.XXXXXX")"
 fixture_bin="${tmpdir}/fixture"
@@ -77,11 +86,11 @@ guest_has_private_ip
 cd "${ROOT}"
 derive_fixture_addr
 
-go build -o "${fixture_bin}" ./vm/vagrant/fixture
-"${fixture_bin}" -listen "${FIXTURE_ADDR}" -ready-file "${fixture_ready}" >"${fixture_log}" 2>&1 &
+go build -buildvcs=false -o "${fixture_bin}" ./vm/vagrant/fixture
+"${fixture_bin}" -listen "${FIXTURE_ADDR}" -https-ports "${FIXTURE_HTTPS_PORTS}" -ready-file "${fixture_ready}" >"${fixture_log}" 2>&1 &
 fixture_pid=$!
 wait_for_fixture
 
 cd vm/vagrant
-printf -v remote_cmd 'cd /home/vagrant/nie && sudo -E env NIE_VM_E2E=1 NIE_VM_FIXTURE_ADDR=%q NIE_VM_ALLOWED_HOST=%q ./vm/vagrant/run-tests.sh' "${FIXTURE_ADDR}" "${ALLOWED_HOST}"
+printf -v remote_cmd 'cd /home/vagrant/nie && sudo -E env NIE_VM_E2E=1 NIE_VM_FIXTURE_ADDR=%q NIE_VM_FIXTURE_HTTPS_PORTS=%q NIE_VM_ALLOWED_HOST=%q ./vm/vagrant/run-tests.sh' "${FIXTURE_ADDR}" "${FIXTURE_HTTPS_PORTS}" "${ALLOWED_HOST}"
 vagrant ssh -c "${remote_cmd}"

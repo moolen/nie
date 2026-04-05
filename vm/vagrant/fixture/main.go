@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,10 +29,15 @@ const (
 
 func main() {
 	listen := flag.String("listen", "192.168.56.1:18080", "listen address")
+	httpsPorts := flag.String("https-ports", "443,8443", "comma-separated HTTPS listen ports")
 	readyFile := flag.String("ready-file", "", "path to write once the listener is ready")
 	flag.Parse()
 
 	host, _, err := net.SplitHostPort(*listen)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ports, err := parsePortList(*httpsPorts)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -56,16 +62,8 @@ func main() {
 		_ = ln.Close()
 		log.Fatal(err)
 	}
-	https443Ln, err := net.Listen("tcp", net.JoinHostPort(host, "443"))
+	httpsListeners, err := listenHTTPS(host, ports)
 	if err != nil {
-		_ = udpEchoPC.Close()
-		_ = tcpEchoLn.Close()
-		_ = ln.Close()
-		log.Fatal(err)
-	}
-	https8443Ln, err := net.Listen("tcp", net.JoinHostPort(host, "8443"))
-	if err != nil {
-		_ = https443Ln.Close()
 		_ = udpEchoPC.Close()
 		_ = tcpEchoLn.Close()
 		_ = ln.Close()
@@ -74,8 +72,7 @@ func main() {
 
 	cert, err := generateSelfSignedServerCert(host)
 	if err != nil {
-		_ = https8443Ln.Close()
-		_ = https443Ln.Close()
+		closeAllListeners(httpsListeners)
 		_ = udpEchoPC.Close()
 		_ = tcpEchoLn.Close()
 		_ = ln.Close()
@@ -83,8 +80,7 @@ func main() {
 	}
 
 	if err := writeReadyFile(*readyFile); err != nil {
-		_ = https8443Ln.Close()
-		_ = https443Ln.Close()
+		closeAllListeners(httpsListeners)
 		_ = udpEchoPC.Close()
 		_ = tcpEchoLn.Close()
 		_ = ln.Close()
@@ -92,26 +88,69 @@ func main() {
 	}
 
 	server := &http.Server{Handler: mux}
-	https443Server := &http.Server{
-		Handler:   mux,
-		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
-	}
-	https8443Server := &http.Server{
-		Handler:   mux,
-		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
-	}
-
-	errCh := make(chan error, 5)
+	errCh := make(chan error, 3+len(httpsListeners))
 	go serveTCPEcho(tcpEchoLn, errCh)
 	go serveUDPEcho(udpEchoPC, errCh)
 	go serveServer(server, ln, false, errCh)
-	go serveServer(https443Server, https443Ln, true, errCh)
-	go serveServer(https8443Server, https8443Ln, true, errCh)
+	for _, httpsLn := range httpsListeners {
+		httpsServer := &http.Server{
+			Handler:   mux,
+			TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
+		}
+		go serveServer(httpsServer, httpsLn, true, errCh)
+	}
 
-	log.Printf("fixture ready: http=%s tcp-echo=%s udp-echo=%s https=443,8443", *listen, tcpEchoLn.Addr(), udpEchoPC.LocalAddr())
+	log.Printf("fixture ready: http=%s tcp-echo=%s udp-echo=%s https=%s", *listen, tcpEchoLn.Addr(), udpEchoPC.LocalAddr(), formatPorts(ports))
 	if err := <-errCh; err != nil {
 		log.Fatal(err)
 	}
+}
+
+func parsePortList(raw string) ([]int, error) {
+	parts := strings.Split(raw, ",")
+	ports := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("empty port in %q", raw)
+		}
+		port, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("parse port %q: %w", part, err)
+		}
+		if port < 1 || port > 65535 {
+			return nil, fmt.Errorf("port %d out of range", port)
+		}
+		ports = append(ports, port)
+	}
+	return ports, nil
+}
+
+func listenHTTPS(host string, ports []int) ([]net.Listener, error) {
+	listeners := make([]net.Listener, 0, len(ports))
+	for _, port := range ports {
+		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err != nil {
+			closeAllListeners(listeners)
+			return nil, err
+		}
+		listeners = append(listeners, ln)
+	}
+	return listeners, nil
+}
+
+func closeAllListeners(listeners []net.Listener) {
+	for _, ln := range listeners {
+		_ = ln.Close()
+	}
+}
+
+func formatPorts(ports []int) string {
+	values := make([]string, 0, len(ports))
+	for _, port := range ports {
+		values = append(values, strconv.Itoa(port))
+	}
+	return strings.Join(values, ",")
 }
 
 func writeReadyFile(path string) error {

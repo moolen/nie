@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -34,15 +35,12 @@ func TestVMEnforceBlocksThenAllowsRealEgress(t *testing.T) {
 	}, "error", "timeout"); got == "" {
 		t.Fatal("icmp direct probe did not block")
 	}
-	if got := waitForProbeResults(t, 5*time.Second, func() string {
-		return httpsProbeResult(net.JoinHostPort(run.fixture.IP, "443"), run.blockedHost, 750*time.Millisecond)
-	}, "error", "timeout"); got == "" {
-		t.Fatal("https 443 probe did not block")
-	}
-	if got := waitForProbeResults(t, 5*time.Second, func() string {
-		return httpsProbeResult(net.JoinHostPort(run.fixture.IP, "8443"), run.blockedHost, 750*time.Millisecond)
-	}, "error", "timeout"); got == "" {
-		t.Fatal("https 8443 probe did not block")
+	for _, port := range run.fixture.HTTPSPorts {
+		if got := waitForProbeResults(t, 5*time.Second, func() string {
+			return httpsProbeResult(net.JoinHostPort(run.fixture.IP, strconv.Itoa(port)), run.blockedHost, 750*time.Millisecond)
+		}, "error", "timeout"); got == "" {
+			t.Fatalf("https %d probe did not block", port)
+		}
 	}
 
 	resp := waitForAnswer(t, run.listenAddr, run.allowedHost+".", run.waitCh, run.logs)
@@ -107,18 +105,16 @@ func TestVMAuditLogsWouldDenyDNSAndEgress(t *testing.T) {
 	assertFixtureLearned(t, resp, run.fixture.IP)
 	waitForLog(t, "would_deny_dns", run.waitCh, run.logs)
 	waitForLog(t, "host=blocked.vm.test", run.waitCh, run.logs)
-	if got := waitForProbeResults(t, 5*time.Second, func() string {
-		return httpsProbeResult(net.JoinHostPort(run.fixture.IP, "443"), run.blockedHost, 750*time.Millisecond)
-	}, "error", "timeout"); got == "" {
-		t.Fatal("https 443 probe did not produce blocked outcome")
+	for _, port := range run.fixture.HTTPSPorts {
+		if got := waitForProbeResults(t, 5*time.Second, func() string {
+			return httpsProbeResult(net.JoinHostPort(run.fixture.IP, strconv.Itoa(port)), run.blockedHost, 750*time.Millisecond)
+		}, "error", "timeout"); got == "" {
+			t.Fatalf("https %d probe did not produce blocked outcome", port)
+		}
 	}
-	if got := waitForProbeResults(t, 5*time.Second, func() string {
-		return httpsProbeResult(net.JoinHostPort(run.fixture.IP, "8443"), run.blockedHost, 750*time.Millisecond)
-	}, "error", "timeout"); got == "" {
-		t.Fatal("https 8443 probe did not produce blocked outcome")
+	for _, port := range run.fixture.HTTPSPorts {
+		waitForLogLine(t, run.waitCh, run.logs, "would_deny_https", "host=blocked.vm.test", fmt.Sprintf("port=%d", port), "method=HEAD", "path=/healthz")
 	}
-	waitForLogLine(t, run.waitCh, run.logs, "would_deny_https", "host=blocked.vm.test", "port=443", "method=HEAD", "path=/healthz")
-	waitForLogLine(t, run.waitCh, run.logs, "would_deny_https", "host=blocked.vm.test", "port=8443", "method=HEAD", "path=/healthz")
 
 	for _, line := range findLogLinesContaining(run.logs.String(), "would_deny_dns") {
 		t.Logf("nie: %s", line)
@@ -169,14 +165,13 @@ func TestVMLongLivedProcessRecoversAcrossNieRestart(t *testing.T) {
 		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
 			"kind=dns", "phase=blocked-proxy", "result=refused",
 		)
-		cursor = waitForProbeStateOneOf(t, probe.waitCh, probe.logs, cursor,
-			[]string{"kind=https", "phase=blocked-443", "result=timeout"},
-			[]string{"kind=https", "phase=blocked-443", "result=error"},
-		)
-		cursor = waitForProbeStateOneOf(t, probe.waitCh, probe.logs, cursor,
-			[]string{"kind=https", "phase=blocked-8443", "result=timeout"},
-			[]string{"kind=https", "phase=blocked-8443", "result=error"},
-		)
+		for _, port := range harness.fixture.HTTPSPorts {
+			phase := fmt.Sprintf("blocked-%d", port)
+			cursor = waitForProbeStateOneOf(t, probe.waitCh, probe.logs, cursor,
+				[]string{"kind=https", "phase=" + phase, "result=timeout"},
+				[]string{"kind=https", "phase=" + phase, "result=error"},
+			)
+		}
 		cursor = waitForProbeState(t, probe.waitCh, probe.logs, cursor,
 			"kind=dns", "phase=allowed-proxy", "result=success",
 		)
@@ -210,9 +205,10 @@ func TestVMLongLivedProcessRecoversAcrossNieRestart(t *testing.T) {
 }
 
 type vmFixture struct {
-	Address string
-	IP      string
-	Port    string
+	Address    string
+	IP         string
+	Port       string
+	HTTPSPorts []int
 }
 
 type vmScenario struct {
@@ -262,6 +258,10 @@ func newVMNieHarness(t *testing.T, scenario vmScenario) *vmNieHarness {
 	}
 
 	fixtureAddr := os.Getenv("NIE_VM_FIXTURE_ADDR")
+	fixtureHTTPSPorts, err := parseFixtureHTTPSPorts(os.Getenv("NIE_VM_FIXTURE_HTTPS_PORTS"))
+	if err != nil {
+		t.Fatalf("parse NIE_VM_FIXTURE_HTTPS_PORTS: %v", err)
+	}
 	allowedHost := os.Getenv("NIE_VM_ALLOWED_HOST")
 	if fixtureAddr == "" || allowedHost == "" {
 		t.Fatal("missing vm e2e environment")
@@ -279,13 +279,13 @@ func newVMNieHarness(t *testing.T, scenario vmScenario) *vmNieHarness {
 	binPath := filepath.Join(tmpDir, "nie")
 	buildNieBinary(t, root, binPath)
 
-	fixture := parseVMFixture(t, fixtureAddr)
+	fixture := parseVMFixture(t, fixtureAddr, fixtureHTTPSPorts)
 	iface := routeInterfaceFor(t, fixture.IP)
 	listenAddr := pickFreeListenAddr(t)
 	httpsListenAddr := pickFreeTCPAddr(t)
 	upstreamAddr := startFakeUpstream(t, fixture.IP)
 	configPath := filepath.Join(tmpDir, "config.yaml")
-	writeVMConfig(t, configPath, scenario.mode, iface, listenAddr, httpsListenAddr, upstreamAddr, scenario.allowHosts)
+	writeVMConfig(t, configPath, scenario.mode, iface, listenAddr, httpsListenAddr, upstreamAddr, scenario.allowHosts, fixture.HTTPSPorts)
 
 	return &vmNieHarness{
 		root:         root,
@@ -373,7 +373,7 @@ func (h *vmNieHarness) stop(t *testing.T, run *vmRun) {
 	waitForVMNieRedirectStateAfterExit(t, false)
 }
 
-func parseVMFixture(t *testing.T, raw string) vmFixture {
+func parseVMFixture(t *testing.T, raw string, httpsPorts []int) vmFixture {
 	t.Helper()
 
 	host, port, err := net.SplitHostPort(raw)
@@ -386,10 +386,28 @@ func parseVMFixture(t *testing.T, raw string) vmFixture {
 	}
 
 	return vmFixture{
-		Address: raw,
-		IP:      ip.String(),
-		Port:    port,
+		Address:    raw,
+		IP:         ip.String(),
+		Port:       port,
+		HTTPSPorts: append([]int(nil), httpsPorts...),
 	}
+}
+
+func parseFixtureHTTPSPorts(raw string) ([]int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return []int{443, 8443}, nil
+	}
+	parts := strings.Split(raw, ",")
+	ports := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		port, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, err
+		}
+		ports = append(ports, port)
+	}
+	return ports, nil
 }
 
 func routeInterfaceFor(t *testing.T, rawIP string) string {
@@ -430,12 +448,16 @@ func routeInterfaceFor(t *testing.T, rawIP string) string {
 	return ""
 }
 
-func writeVMConfig(t *testing.T, path, mode, iface, listenAddr, httpsListenAddr, upstreamAddr string, allowHosts []string) {
+func writeVMConfig(t *testing.T, path, mode, iface, listenAddr, httpsListenAddr, upstreamAddr string, allowHosts []string, httpsPorts []int) {
 	t.Helper()
 
 	allowSection := ""
 	for _, host := range allowHosts {
 		allowSection += fmt.Sprintf("    - %s\n", host)
+	}
+	httpsPortsSection := ""
+	for _, port := range httpsPorts {
+		httpsPortsSection += fmt.Sprintf("    - %d\n", port)
 	}
 
 	raw := fmt.Sprintf(`mode: %s
@@ -452,9 +474,7 @@ policy:
 https:
   listen: %s
   ports:
-    - 443
-    - 8443
-`, mode, iface, listenAddr, upstreamAddr, allowSection, httpsListenAddr)
+%s`, mode, iface, listenAddr, upstreamAddr, allowSection, httpsListenAddr, httpsPortsSection)
 
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatalf("write vm config: %v", err)
@@ -483,6 +503,7 @@ func startVMProbe(t *testing.T, harness *vmNieHarness) *vmProbeRun {
 
 	cmd := exec.CommandContext(ctx, binPath,
 		"-fixture", harness.fixture.Address,
+		"-https-ports", joinFixturePorts(harness.fixture.HTTPSPorts),
 		"-proxy-dns", harness.listenAddr,
 		"-upstream-dns", harness.upstreamAddr,
 		"-allowed-host", harness.allowedHost,
@@ -522,6 +543,14 @@ func startVMProbe(t *testing.T, harness *vmNieHarness) *vmProbeRun {
 	})
 
 	return run
+}
+
+func joinFixturePorts(ports []int) string {
+	values := make([]string, 0, len(ports))
+	for _, port := range ports {
+		values = append(values, strconv.Itoa(port))
+	}
+	return strings.Join(values, ",")
 }
 
 func waitForLogLine(t *testing.T, waitCh <-chan error, logs *lockedBuffer, needles ...string) {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -31,6 +33,7 @@ type probeConfig struct {
 	upstreamDNS string
 	allowedHost string
 	blockedHost string
+	httpsPorts  []int
 	interval    time.Duration
 	timeout     time.Duration
 }
@@ -83,9 +86,16 @@ func parseConfig() probeConfig {
 	upstreamDNS := flag.String("upstream-dns", "", "upstream DNS host:port")
 	allowedHost := flag.String("allowed-host", "", "allowed hostname")
 	blockedHost := flag.String("blocked-host", "", "blocked hostname")
+	httpsPorts := flag.String("https-ports", "443,8443", "comma-separated HTTPS fixture ports")
 	interval := flag.Duration("interval", 1*time.Second, "probe interval")
 	timeout := flag.Duration("timeout", 2*time.Second, "probe timeout")
 	flag.Parse()
+
+	parsedHTTPSPorts, err := parsePortList(*httpsPorts, []int{443, 8443})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "parse https ports: %v\n", err)
+		os.Exit(2)
+	}
 
 	return probeConfig{
 		fixture:     *fixture,
@@ -93,6 +103,7 @@ func parseConfig() probeConfig {
 		upstreamDNS: normalizeAddr(*upstreamDNS, "53"),
 		allowedHost: *allowedHost,
 		blockedHost: *blockedHost,
+		httpsPorts:  parsedHTTPSPorts,
 		interval:    *interval,
 		timeout:     *timeout,
 	}
@@ -154,18 +165,15 @@ func runProbeCycle(cfg probeConfig, w io.Writer) {
 		Target: fixtureIP,
 		Result: icmpProbe(fixtureIP, cfg.timeout),
 	})
-	emitResult(w, probeResult{
-		Kind:   "https",
-		Phase:  "blocked-443",
-		Target: net.JoinHostPort(cfg.blockedHost, "443"),
-		Result: httpsProbe(net.JoinHostPort(fixtureIP, "443"), cfg.blockedHost, cfg.timeout),
-	})
-	emitResult(w, probeResult{
-		Kind:   "https",
-		Phase:  "blocked-8443",
-		Target: net.JoinHostPort(cfg.blockedHost, "8443"),
-		Result: httpsProbe(net.JoinHostPort(fixtureIP, "8443"), cfg.blockedHost, cfg.timeout),
-	})
+	for _, port := range cfg.httpsPorts {
+		portStr := strconv.Itoa(port)
+		emitResult(w, probeResult{
+			Kind:   "https",
+			Phase:  blockedHTTPSPhase(port),
+			Target: net.JoinHostPort(cfg.blockedHost, portStr),
+			Result: httpsProbe(net.JoinHostPort(fixtureIP, portStr), cfg.blockedHost, cfg.timeout),
+		})
+	}
 }
 
 func tcpProbe(target string, timeout time.Duration) string {
@@ -321,6 +329,34 @@ func fixtureUDPEchoAddr(ip string) string {
 		return ""
 	}
 	return net.JoinHostPort(ip, fmt.Sprintf("%d", fixtureUDPEchoPort))
+}
+
+func blockedHTTPSPhase(port int) string {
+	return fmt.Sprintf("blocked-%d", port)
+}
+
+func parsePortList(raw string, defaults []int) ([]int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return append([]int(nil), defaults...), nil
+	}
+
+	parts := strings.Split(raw, ",")
+	ports := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, errors.New("empty port")
+		}
+		port, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("parse port %q: %w", part, err)
+		}
+		if port < 1 || port > 65535 {
+			return nil, fmt.Errorf("port %d out of range", port)
+		}
+		ports = append(ports, port)
+	}
+	return ports, nil
 }
 
 func normalizeAddr(addr, defaultPort string) string {

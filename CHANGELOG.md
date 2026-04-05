@@ -1,3 +1,24 @@
+# [1.1.0](https://github.com/moolen/nie/compare/v1.0.4...v1.1.0) (2026-04-05)
+
+
+### Bug Fixes
+
+* complete stale trust cleanup wiring ([e796e2b](https://github.com/moolen/nie/commit/e796e2b7c4a7c7f2760eaaa93dc1817315d15af6))
+* keep stale tcp entries on conntrack errors ([c4cf380](https://github.com/moolen/nie/commit/c4cf3806604ec271c29cc10458e5a6f85eba3447))
+* keep trustsync stale pruning explicit ([d164088](https://github.com/moolen/nie/commit/d164088a1509ca8eac0ed052c6b0a39d40e24238))
+* preserve trust writer compatibility for delete support ([1b993c2](https://github.com/moolen/nie/commit/1b993c2c704d8971f6f62e2b24ec51e26702c499))
+* remove dns proxy trust writer fallback ([f0314b1](https://github.com/moolen/nie/commit/f0314b151bf8ac27ee4a8bd8ccfb0388c8350a27))
+
+
+### Features
+
+* add dns trust reconciliation state ([1882708](https://github.com/moolen/nie/commit/188270875761b354a84448f418a92bfc51674e6f))
+* add ebpf trust delete support ([062b464](https://github.com/moolen/nie/commit/062b464ceb580a76aa3ddaa9ebb69d8e4939af16))
+* gate stale tcp cleanup on conntrack ([89c27de](https://github.com/moolen/nie/commit/89c27defb16db9eb78a30fc47b653d1179b94ed7))
+* reconcile dns trust by hostname ([30f0646](https://github.com/moolen/nie/commit/30f0646fa38964699690da90e2abb4f665df7fe3))
+* reconcile long-lived dns trust state ([9237394](https://github.com/moolen/nie/commit/9237394fbfff8b4794f54df2d59171aef1839ef2))
+* run trust reconciler in app lifecycle ([618c516](https://github.com/moolen/nie/commit/618c51666bee2f7cf9e3828c50cb09530728458e))
+
 ## [1.0.4](https://github.com/moolen/nie/compare/v1.0.3...v1.0.4) (2026-04-05)
 
 

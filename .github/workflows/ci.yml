@@ -85,4 +85,4 @@ jobs:
       - name: Run root smoke test against built binary
         run: |
           sudo env "PATH=$PATH" "NIE_TEST_BIN=$PWD/dist/nie" \
-            go test -tags=integration ./test -run 'TestSmoke_(AuditModeAllowsUnknownTrafficButEmitsWouldDeny|EnforceBlocksUnknownTrafficUntilDNSLearning)' -count=1 -v
+            go test -tags=integration ./test -run 'TestSmoke_(AuditModeAllowsUnknownTrafficButEmitsWouldDeny|AuditCapturesPinnedDockerBuildDomains|EnforceBlocksUnknownTrafficUntilDNSLearning)' -count=1 -timeout 20m -v

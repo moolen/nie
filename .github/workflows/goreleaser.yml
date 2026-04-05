@@ -24,22 +24,33 @@ jobs:
       - name: Wait for GitHub release to exist for this tag
         run: |
           for attempt in {1..30}; do
-            if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            status_code="$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}")"
+
+            if [ "${status_code}" = "200" ]; then
               echo "GitHub release for tag ${GITHUB_REF_NAME} is available."
               exit 0
             fi
 
-            echo "Waiting for GitHub release for tag ${GITHUB_REF_NAME} (attempt ${attempt}/30)..."
+            if [ "${status_code}" != "404" ]; then
+              echo "GitHub API returned HTTP ${status_code} while waiting for release tag ${GITHUB_REF_NAME}."
+            fi
+
+            echo "Waiting for GitHub release for tag ${GITHUB_REF_NAME} (attempt ${attempt}/30, status ${status_code})..."
             sleep 10
           done
 
           echo "Timed out waiting for GitHub release for tag ${GITHUB_REF_NAME}."
           exit 1
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: goreleaser/goreleaser-action@v7
         with:
+          distribution: goreleaser
+          version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

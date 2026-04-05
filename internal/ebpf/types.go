@@ -15,6 +15,7 @@ type TrustEntry struct {
 
 type TrustWriter interface {
 	Allow(ctx context.Context, entry TrustEntry) error
+	Delete(ctx context.Context, ipv4 netip.Addr, port uint16) error
 }
 
 type EgressReason uint32

@@ -274,6 +274,7 @@ type allowValue struct {
 
 type allowMap interface {
 	Put(key allowKey, value allowValue) error
+	Delete(key allowKey) error
 }
 
 type runtimeObjects interface {
@@ -414,6 +415,13 @@ func (m liveAllowMap) Put(key allowKey, value allowValue) error {
 		return errors.New("allow map is not loaded")
 	}
 	return m.m.Put(key, value)
+}
+
+func (m liveAllowMap) Delete(key allowKey) error {
+	if m.m == nil {
+		return errors.New("allow map is not loaded")
+	}
+	return m.m.Delete(key)
 }
 
 type liveEventReader struct {
@@ -642,4 +650,11 @@ func (w *trustWriter) Allow(_ context.Context, entry TrustEntry) error {
 
 	key, value := encodeEntry(entry, nowWall, nowMono)
 	return w.m.Put(key, value)
+}
+
+func (w *trustWriter) Delete(_ context.Context, ipv4 netip.Addr, port uint16) error {
+	if !ipv4.Is4() {
+		return fmt.Errorf("invalid IPv4: %q", ipv4.String())
+	}
+	return w.m.Delete(allowKey{Addr: ipv4.As4(), Dport: port})
 }

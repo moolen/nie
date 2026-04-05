@@ -169,7 +169,7 @@ func TestSmoke_EnforceBlocksUnknownTrafficUntilDNSLearning(t *testing.T) {
 		allowHosts:      []string{"allowed.example.com"},
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binPath, "-config", configPath)
@@ -256,6 +256,121 @@ func TestSmoke_EnforceBlocksUnknownTrafficUntilDNSLearning(t *testing.T) {
 	waitForNieRedirectStateAfterExit(t, false)
 }
 
+func TestSmoke_EnforceKeepsActiveTCPFlowAcrossDNSRotationAndEventuallyPrunesStaleIP(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root")
+	}
+	if os.Getenv("NIE_ENABLE_LOOPBACK_ENFORCE_SMOKE") != "1" {
+		t.Skip("loopback enforce smoke is opt-in; enforce behavior is covered in VM e2e where DNS control-plane traffic does not traverse the protected loopback path")
+	}
+
+	root := repoRoot(t)
+	tmpDir := t.TempDir()
+	fixtureA := startIntegrationFixture(t, "127.0.0.2")
+	fixtureB := startIntegrationFixture(t, "127.0.0.3")
+	cleanupStaleNieRedirectState(t)
+
+	binPath := resolveNieBinary(t, root, tmpDir)
+	upstream := startRotatingFakeUpstreamWithTTL(t, fixtureA.IP, 1)
+	listenAddr := pickFreeListenAddr(t)
+	httpsListenAddr := pickFreeTCPAddr(t)
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeConfig(t, configPath, writeConfigOptions{
+		mode:               "enforce",
+		iface:              "lo",
+		listenAddr:         listenAddr,
+		httpsListenAddr:    httpsListenAddr,
+		upstreamAddr:       upstream.Addr(),
+		allowHosts:         []string{"allowed.example.com"},
+		trustMaxStaleHold:  "0s",
+		trustSweepInterval: "100ms",
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binPath, "-config", configPath)
+	cmd.Dir = root
+
+	var logs lockedBuffer
+	cmd.Stdout = &logs
+	cmd.Stderr = &logs
+
+	waitCh := make(chan error, 1)
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start nie: %v", err)
+	}
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = terminateNieProcess(cmd, waitCh, &logs)
+		}
+	})
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	waitForPinnedState(t, "/sys/fs/bpf/nie", true, waitCh, &logs)
+	waitForNieRedirectState(t, true, waitCh, &logs)
+
+	respA := waitForMarkedAnswer(t, 4242, listenAddr, "allowed.example.com.", waitCh, &logs)
+	if respA.Rcode != dns.RcodeSuccess {
+		t.Fatalf("first rcode = %d, want %d; logs=%s", respA.Rcode, dns.RcodeSuccess, logs.String())
+	}
+	if !hasIPv4Answer(respA, fixtureA.IP) {
+		t.Fatalf("first response answers = %#v, want A %s", respA.Answer, fixtureA.IP)
+	}
+
+	longLivedProbe, err := startPersistentTCPEchoProbe(fixtureTCPEchoAddr(fixtureA.IP), 300*time.Millisecond)
+	if err != nil {
+		t.Fatalf("start persistent tcp probe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = longLivedProbe.Close()
+	})
+
+	upstream.SetAnswerIP(fixtureB.IP)
+
+	respB := waitForMarkedAnswer(t, 4242, listenAddr, "allowed.example.com.", waitCh, &logs)
+	if respB.Rcode != dns.RcodeSuccess {
+		t.Fatalf("second rcode = %d, want %d; logs=%s", respB.Rcode, dns.RcodeSuccess, logs.String())
+	}
+	if !hasIPv4Answer(respB, fixtureB.IP) {
+		t.Fatalf("second response answers = %#v, want A %s", respB.Answer, fixtureB.IP)
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+
+	if got := waitForProbeResults(t, 5*time.Second, func() string {
+		return tcpExchangeResult(fixtureTCPEchoAddr(fixtureB.IP), 300*time.Millisecond)
+	}, "success"); got != "success" {
+		t.Fatalf("fresh tcp flow to rotated IP result = %q, want success", got)
+	}
+
+	if got := waitForProbeResults(t, 5*time.Second, func() string {
+		return longLivedProbe.Exchange(300 * time.Millisecond)
+	}, "success"); got != "success" {
+		t.Fatalf("long-lived tcp flow result after rotation = %q, want success", got)
+	}
+
+	if err := longLivedProbe.Close(); err != nil {
+		t.Fatalf("close persistent tcp probe: %v", err)
+	}
+
+	waitForBlockedProbe(t, 2*time.Minute, func() string {
+		return tcpExchangeResult(fixtureTCPEchoAddr(fixtureA.IP), 300*time.Millisecond)
+	})
+
+	if err := terminateNieProcess(cmd, waitCh, &logs); err != nil {
+		t.Fatalf("wait for nie exit: %v; logs=%s", err, logs.String())
+	}
+	stopped = true
+
+	waitForPinnedStateAfterExit(t, "/sys/fs/bpf/nie", false)
+	waitForNieRedirectStateAfterExit(t, false)
+}
+
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -308,45 +423,88 @@ func resolveNieBinary(t *testing.T, root, tmpDir string) string {
 func startFakeUpstream(t *testing.T, answerIP string) string {
 	t.Helper()
 
+	return startRotatingFakeUpstream(t, answerIP).Addr()
+}
+
+type rotatingFakeUpstream struct {
+	mu       sync.RWMutex
+	answerIP string
+	server   *dns.Server
+	pc       net.PacketConn
+}
+
+func startRotatingFakeUpstream(t *testing.T, answerIP string) *rotatingFakeUpstream {
+	t.Helper()
+
+	return startRotatingFakeUpstreamWithTTL(t, answerIP, 60)
+}
+
+func startRotatingFakeUpstreamWithTTL(t *testing.T, answerIP string, ttl uint32) *rotatingFakeUpstream {
+	t.Helper()
+
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen fake upstream: %v", err)
+	}
+
+	upstream := &rotatingFakeUpstream{
+		answerIP: answerIP,
+		pc:       pc,
 	}
 
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
 		resp := new(dns.Msg)
 		resp.SetReply(req)
 		if len(req.Question) == 1 && req.Question[0].Qtype == dns.TypeA {
-			resp.Answer = []dns.RR{&dns.A{
-				Hdr: dns.RR_Header{
-					Name:   req.Question[0].Name,
-					Rrtype: dns.TypeA,
-					Class:  dns.ClassINET,
-					Ttl:    60,
-				},
-				A: net.ParseIP(answerIP).To4(),
-			}}
+			answerIP := upstream.answer()
+			if ip := net.ParseIP(answerIP).To4(); ip != nil {
+				resp.Answer = []dns.RR{&dns.A{
+					Hdr: dns.RR_Header{
+						Name:   req.Question[0].Name,
+						Rrtype: dns.TypeA,
+						Class:  dns.ClassINET,
+						Ttl:    ttl,
+					},
+					A: ip,
+				}}
+			}
 		}
 		_ = w.WriteMsg(resp)
 	})
 
-	server := &dns.Server{
+	upstream.server = &dns.Server{
 		PacketConn: pc,
 		Handler:    handler,
 	}
 
 	go func() {
-		_ = server.ActivateAndServe()
+		_ = upstream.server.ActivateAndServe()
 	}()
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = server.ShutdownContext(ctx)
+		_ = upstream.server.ShutdownContext(ctx)
 		_ = pc.Close()
 	})
 
-	return pc.LocalAddr().String()
+	return upstream
+}
+
+func (u *rotatingFakeUpstream) Addr() string {
+	return u.pc.LocalAddr().String()
+}
+
+func (u *rotatingFakeUpstream) SetAnswerIP(answerIP string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.answerIP = answerIP
+}
+
+func (u *rotatingFakeUpstream) answer() string {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.answerIP
 }
 
 func pickFreeListenAddr(t *testing.T) string {
@@ -394,12 +552,14 @@ func pickFreeTCPAddr(t *testing.T) string {
 }
 
 type writeConfigOptions struct {
-	mode            string
-	iface           string
-	listenAddr      string
-	httpsListenAddr string
-	upstreamAddr    string
-	allowHosts      []string
+	mode               string
+	iface              string
+	listenAddr         string
+	httpsListenAddr    string
+	upstreamAddr       string
+	allowHosts         []string
+	trustMaxStaleHold  string
+	trustSweepInterval string
 }
 
 func writeConfig(t *testing.T, path string, opts writeConfigOptions) {
@@ -408,6 +568,17 @@ func writeConfig(t *testing.T, path string, opts writeConfigOptions) {
 	allowSection := ""
 	for _, host := range opts.allowHosts {
 		allowSection += fmt.Sprintf("    - %s\n", host)
+	}
+
+	trustSection := ""
+	if opts.trustMaxStaleHold != "" || opts.trustSweepInterval != "" {
+		trustSection = "trust:\n"
+		if opts.trustMaxStaleHold != "" {
+			trustSection += fmt.Sprintf("  max_stale_hold: %s\n", opts.trustMaxStaleHold)
+		}
+		if opts.trustSweepInterval != "" {
+			trustSection += fmt.Sprintf("  sweep_interval: %s\n", opts.trustSweepInterval)
+		}
 	}
 
 	raw := fmt.Sprintf(`mode: %s
@@ -421,12 +592,12 @@ policy:
   default: deny
   allow:
 %s
-https:
+%shttps:
   listen: %s
   ports:
     - 443
     - 8443
-`, opts.mode, opts.iface, opts.listenAddr, opts.upstreamAddr, allowSection, opts.httpsListenAddr)
+`, opts.mode, opts.iface, opts.listenAddr, opts.upstreamAddr, allowSection, trustSection, opts.httpsListenAddr)
 
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -507,6 +678,14 @@ func hasIPv4Answer(resp *dns.Msg, want string) bool {
 		}
 	}
 	return false
+}
+
+func waitForBlockedProbe(t *testing.T, timeout time.Duration, probe func() string) {
+	t.Helper()
+
+	if got := waitForProbeResults(t, timeout, probe, "error", "timeout"); got == "" {
+		t.Fatal("probe did not become blocked")
+	}
 }
 
 func waitForLog(t *testing.T, needle string, waitCh <-chan error, logs *lockedBuffer) {

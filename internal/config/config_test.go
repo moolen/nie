@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadConfig_Valid(t *testing.T) {
@@ -960,5 +961,129 @@ policy:
 	}
 	if !strings.Contains(err.Error(), "policy.allow[1]") {
 		t.Fatalf("Load() error = %v, want failing allow index in error", err)
+	}
+}
+
+func TestLoadConfig_AcceptsTrustDurations(t *testing.T) {
+	cfg, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+trust:
+  max_stale_hold: 2m30s
+  sweep_interval: 15s
+`))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Trust.MaxStaleHold != 2*time.Minute+30*time.Second {
+		t.Fatalf("Trust.MaxStaleHold = %s, want 2m30s", cfg.Trust.MaxStaleHold)
+	}
+	if cfg.Trust.SweepInterval != 15*time.Second {
+		t.Fatalf("Trust.SweepInterval = %s, want 15s", cfg.Trust.SweepInterval)
+	}
+}
+
+func TestLoadConfig_RejectsNegativeTrustMaxStaleHold(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+trust:
+  max_stale_hold: -1s
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "trust.max_stale_hold") {
+		t.Fatalf("Load() error = %v, want trust.max_stale_hold context", err)
+	}
+}
+
+func TestLoadConfig_RejectsNegativeTrustSweepInterval(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+trust:
+  sweep_interval: -1s
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "trust.sweep_interval") {
+		t.Fatalf("Load() error = %v, want trust.sweep_interval context", err)
+	}
+}
+
+func TestLoadConfig_RejectsMalformedTrustMaxStaleHold(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+trust:
+  max_stale_hold: nope
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "trust.max_stale_hold") {
+		t.Fatalf("Load() error = %v, want trust.max_stale_hold context", err)
+	}
+}
+
+func TestLoadConfig_RejectsMalformedTrustSweepInterval(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+trust:
+  sweep_interval: nope
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "trust.sweep_interval") {
+		t.Fatalf("Load() error = %v, want trust.sweep_interval context", err)
 	}
 }

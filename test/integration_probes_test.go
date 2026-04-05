@@ -112,10 +112,14 @@ func serveTCPEcho(ln net.Listener) {
 		go func(conn net.Conn) {
 			defer conn.Close()
 			buf := make([]byte, len(integrationProbePayload))
-			if _, err := io.ReadFull(conn, buf); err != nil {
-				return
+			for {
+				if _, err := io.ReadFull(conn, buf); err != nil {
+					return
+				}
+				if _, err := conn.Write(buf); err != nil {
+					return
+				}
 			}
-			_, _ = conn.Write(buf)
 		}(conn)
 	}
 }
@@ -209,6 +213,89 @@ func tcpExchangeResult(target string, timeout time.Duration) string {
 		return "error"
 	}
 	return "success"
+}
+
+type persistentTCPEchoProbe struct {
+	conn net.Conn
+}
+
+func startPersistentTCPEchoProbe(target string, timeout time.Duration) (*persistentTCPEchoProbe, error) {
+	if target == "" {
+		return nil, fmt.Errorf("missing target")
+	}
+	conn, err := net.DialTimeout("tcp", target, timeout)
+	if err != nil {
+		return nil, err
+	}
+	probe := &persistentTCPEchoProbe{conn: conn}
+	if got := probe.Exchange(timeout); got != "success" {
+		_ = conn.Close()
+		return nil, fmt.Errorf("initial exchange = %s", got)
+	}
+	return probe, nil
+}
+
+func (p *persistentTCPEchoProbe) Exchange(timeout time.Duration) string {
+	if p == nil || p.conn == nil {
+		return "error"
+	}
+	_ = p.conn.SetDeadline(time.Now().Add(timeout))
+	if _, err := io.WriteString(p.conn, integrationProbePayload); err != nil {
+		return classifyProbeError(err)
+	}
+	buf := make([]byte, len(integrationProbePayload))
+	if _, err := io.ReadFull(p.conn, buf); err != nil {
+		return classifyProbeError(err)
+	}
+	if string(buf) != integrationProbePayload {
+		return "error"
+	}
+	return "success"
+}
+
+func (p *persistentTCPEchoProbe) Close() error {
+	if p == nil || p.conn == nil {
+		return nil
+	}
+	err := p.conn.Close()
+	p.conn = nil
+	return err
+}
+
+func TestPersistentTCPEchoProbeKeepsConnectionAliveAcrossExchanges(t *testing.T) {
+	ln := mustListenTCP(t, "127.0.0.1:0")
+	go serveTCPEcho(ln)
+	t.Cleanup(func() {
+		_ = ln.Close()
+	})
+
+	probe, err := startPersistentTCPEchoProbe(ln.Addr().String(), 300*time.Millisecond)
+	if err != nil {
+		t.Fatalf("startPersistentTCPEchoProbe() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = probe.Close()
+	})
+
+	if got := probe.Exchange(300 * time.Millisecond); got != "success" {
+		t.Fatalf("second Exchange() = %q, want success", got)
+	}
+}
+
+func TestWaitForBlockedProbeAcceptsDelayedBlockedOutcome(t *testing.T) {
+	attempts := 0
+
+	waitForBlockedProbe(t, 500*time.Millisecond, func() string {
+		attempts++
+		if attempts < 3 {
+			return "success"
+		}
+		return "timeout"
+	})
+
+	if attempts != 3 {
+		t.Fatalf("probe attempts = %d, want 3", attempts)
+	}
 }
 
 func udpExchangeResult(target string, timeout time.Duration) string {

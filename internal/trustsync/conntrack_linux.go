@@ -7,6 +7,7 @@ import (
 	"net/netip"
 
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 )
 
@@ -38,6 +39,9 @@ func (i *netlinkConntrackInspector) HasActiveTCPFlow(dst Destination) (bool, err
 		if flow.Forward.Protocol != uint8(ProtocolTCP) && flow.Reverse.Protocol != uint8(ProtocolTCP) {
 			continue
 		}
+		if !flowHasActiveTCPState(flow) {
+			continue
+		}
 		if tupleMatchesDestination(flow.Forward.DstIP, flow.Forward.DstPort, dst) {
 			return true, nil
 		}
@@ -65,4 +69,18 @@ func tupleMatchesDestination(rawIP net.IP, port uint16, dst Destination) bool {
 		return false
 	}
 	return tupleIP.Unmap() == dst.IP.Unmap() && port == dst.Port
+}
+
+func flowHasActiveTCPState(flow *netlink.ConntrackFlow) bool {
+	tcpInfo, ok := flow.ProtoInfo.(*netlink.ProtoInfoTCP)
+	if !ok || tcpInfo == nil {
+		return true
+	}
+
+	switch tcpInfo.State {
+	case nl.TCP_CONNTRACK_NONE, nl.TCP_CONNTRACK_TIME_WAIT, nl.TCP_CONNTRACK_CLOSE, nl.TCP_CONNTRACK_IGNORE:
+		return false
+	default:
+		return true
+	}
 }

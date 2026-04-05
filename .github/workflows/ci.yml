@@ -77,6 +77,11 @@ jobs:
           mkdir -p dist
           CGO_ENABLED=0 go build -buildvcs=false -o dist/nie ./cmd/nie
 
+      - name: Make loopback IPv4-only for smoke
+        run: |
+          sudo ip -6 addr flush dev lo
+          ip -brief addr show lo
+
       - name: Run root smoke test against built binary
         run: |
           sudo env "PATH=$PATH" "NIE_TEST_BIN=$PWD/dist/nie" \

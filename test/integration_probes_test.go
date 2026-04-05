@@ -112,10 +112,14 @@ func serveTCPEcho(ln net.Listener) {
 		go func(conn net.Conn) {
 			defer conn.Close()
 			buf := make([]byte, len(integrationProbePayload))
-			if _, err := io.ReadFull(conn, buf); err != nil {
-				return
+			for {
+				if _, err := io.ReadFull(conn, buf); err != nil {
+					return
+				}
+				if _, err := conn.Write(buf); err != nil {
+					return
+				}
 			}
-			_, _ = conn.Write(buf)
 		}(conn)
 	}
 }
@@ -256,6 +260,26 @@ func (p *persistentTCPEchoProbe) Close() error {
 	err := p.conn.Close()
 	p.conn = nil
 	return err
+}
+
+func TestPersistentTCPEchoProbeKeepsConnectionAliveAcrossExchanges(t *testing.T) {
+	ln := mustListenTCP(t, "127.0.0.1:0")
+	go serveTCPEcho(ln)
+	t.Cleanup(func() {
+		_ = ln.Close()
+	})
+
+	probe, err := startPersistentTCPEchoProbe(ln.Addr().String(), 300*time.Millisecond)
+	if err != nil {
+		t.Fatalf("startPersistentTCPEchoProbe() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = probe.Close()
+	})
+
+	if got := probe.Exchange(300 * time.Millisecond); got != "success" {
+		t.Fatalf("second Exchange() = %q, want success", got)
+	}
 }
 
 func udpExchangeResult(target string, timeout time.Duration) string {

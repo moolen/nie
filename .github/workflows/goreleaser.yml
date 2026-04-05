@@ -1,9 +1,12 @@
 name: GoReleaser
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish assets for
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -15,6 +18,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: refs/tags/${{ inputs.tag }}
 
       - uses: actions/setup-go@v6
         with:
@@ -27,25 +31,26 @@ jobs:
             status_code="$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" \
               --header "Authorization: Bearer ${GITHUB_TOKEN}" \
               --header "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}")"
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
 
             if [ "${status_code}" = "200" ]; then
-              echo "GitHub release for tag ${GITHUB_REF_NAME} is available."
+              echo "GitHub release for tag ${TAG} is available."
               exit 0
             fi
 
             if [ "${status_code}" != "404" ]; then
-              echo "GitHub API returned HTTP ${status_code} while waiting for release tag ${GITHUB_REF_NAME}."
+              echo "GitHub API returned HTTP ${status_code} while waiting for release tag ${TAG}."
             fi
 
-            echo "Waiting for GitHub release for tag ${GITHUB_REF_NAME} (attempt ${attempt}/30, status ${status_code})..."
+            echo "Waiting for GitHub release for tag ${TAG} (attempt ${attempt}/30, status ${status_code})..."
             sleep 10
           done
 
-          echo "Timed out waiting for GitHub release for tag ${GITHUB_REF_NAME}."
+          echo "Timed out waiting for GitHub release for tag ${TAG}."
           exit 1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
 
       - uses: goreleaser/goreleaser-action@v7
         with:

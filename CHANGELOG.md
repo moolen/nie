@@ -1,3 +1,10 @@
+## [1.0.2](https://github.com/moolen/nie/compare/v1.0.1...v1.0.2) (2026-04-05)
+
+
+### Bug Fixes
+
+* **ci:** clean npm workspace before goreleaser publish ([757122f](https://github.com/moolen/nie/commit/757122f1ea18742490fe70677bb736686ddd8898))
+
 ## [1.0.1](https://github.com/moolen/nie/compare/v1.0.0...v1.0.1) (2026-04-05)
 
 

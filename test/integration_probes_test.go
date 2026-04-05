@@ -282,6 +282,21 @@ func TestPersistentTCPEchoProbeKeepsConnectionAliveAcrossExchanges(t *testing.T)
 	}
 }
 
+func TestWaitForBooleanOracleWaitsForWantedState(t *testing.T) {
+	waitCh := make(chan error)
+	logs := &lockedBuffer{}
+	calls := 0
+
+	waitForBooleanOracle(t, 500*time.Millisecond, "flow drained", true, waitCh, logs, func() (bool, error) {
+		calls++
+		return calls >= 3, nil
+	})
+
+	if calls != 3 {
+		t.Fatalf("oracle calls = %d, want 3", calls)
+	}
+}
+
 func udpExchangeResult(target string, timeout time.Duration) string {
 	if target == "" {
 		return "error"

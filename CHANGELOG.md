@@ -1,3 +1,10 @@
+## [1.0.4](https://github.com/moolen/nie/compare/v1.0.3...v1.0.4) (2026-04-05)
+
+
+### Bug Fixes
+
+* harden learned trust and MITM classification ([2a859eb](https://github.com/moolen/nie/commit/2a859eb4ed42df335c9e8218c8df89b319f49e11))
+
 ## [1.0.3](https://github.com/moolen/nie/compare/v1.0.2...v1.0.3) (2026-04-05)
 
 

@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"github.com/moolen/nie/internal/config"
 	"github.com/moolen/nie/internal/ebpf"
 	"github.com/moolen/nie/internal/runtime"
+	"github.com/moolen/nie/internal/trustsync"
 )
 
 func TestAppPackageScaffold(t *testing.T) {
@@ -334,12 +337,14 @@ func (f *fakeDNSServer) ShutdownContext(context.Context) error {
 	return f.stopErr
 }
 
-func TestBuildComponentsUsesLiveTrustWriter(t *testing.T) {
+func TestBuildComponentsUsesLiveTrustReconciler(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := testConfig(t)
 	manager := &fakeEBPFManager{}
 
-	var capturedTrust ebpf.TrustWriter
+	var capturedReconciler interface {
+		ReconcileHost(context.Context, string, []ebpf.TrustEntry) error
+	}
 	builders := componentBuilders{
 		newPolicy:         func([]string) (policyAllows, error) { return allowAllPolicy{}, nil },
 		validateInterface: func(string) error { return nil },
@@ -350,7 +355,7 @@ func TestBuildComponentsUsesLiveTrustWriter(t *testing.T) {
 			return &fakeLifecycle{}, nil
 		},
 		newDNSProxy: func(cfg dnsProxyConfig) dns.Handler {
-			capturedTrust = cfg.Trust
+			capturedReconciler = cfg.Reconciler
 			return dns.HandlerFunc(func(dns.ResponseWriter, *dns.Msg) {})
 		},
 		newDNSLifecycle: func(string, dns.Handler) runtime.Lifecycle {
@@ -361,22 +366,42 @@ func TestBuildComponentsUsesLiveTrustWriter(t *testing.T) {
 		},
 	}
 
-	if _, err := buildComponents(cfg, logger, builders); err != nil {
+	svc, err := buildComponents(cfg, logger, builders)
+	if err != nil {
 		t.Fatalf("buildComponents() error = %v", err)
 	}
-	if capturedTrust == nil {
-		t.Fatal("buildComponents() passed nil trust writer")
+	if svc.Trust == nil {
+		t.Fatal("buildComponents() returned nil trust lifecycle")
+	}
+	lifecycleSync, ok := svc.Trust.(*trustsync.Service)
+	if !ok {
+		t.Fatalf("buildComponents() trust lifecycle type = %T, want *trustsync.Service", svc.Trust)
+	}
+	if capturedReconciler == nil {
+		t.Fatal("buildComponents() passed nil trust reconciler")
+	}
+	reconcilerImpl, ok := capturedReconciler.(liveTrustReconciler)
+	if !ok {
+		t.Fatalf("capturedReconciler type = %T, want liveTrustReconciler", capturedReconciler)
+	}
+	reconcilerSync, ok := reconcilerImpl.sync.(*trustsync.Service)
+	if !ok {
+		t.Fatalf("live trust reconciler sync type = %T, want *trustsync.Service", reconcilerImpl.sync)
+	}
+	if reconcilerSync != lifecycleSync {
+		t.Fatal("buildComponents() did not share trust service between reconciler and lifecycle")
 	}
 
 	entry := ebpf.TrustEntry{
 		IPv4:      netip.MustParseAddr("127.0.0.1"),
+		Port:      443,
 		ExpiresAt: time.Now().Add(time.Minute),
 	}
 
 	first := &captureTrustWriter{}
 	manager.writer = first
-	if err := capturedTrust.Allow(context.Background(), entry); err != nil {
-		t.Fatalf("capturedTrust.Allow() with first writer error = %v", err)
+	if err := capturedReconciler.ReconcileHost(context.Background(), "api.github.com", []ebpf.TrustEntry{entry}); err != nil {
+		t.Fatalf("capturedReconciler.ReconcileHost() with first writer error = %v", err)
 	}
 	if first.calls != 1 {
 		t.Fatalf("first.calls = %d, want 1", first.calls)
@@ -384,14 +409,166 @@ func TestBuildComponentsUsesLiveTrustWriter(t *testing.T) {
 
 	second := &captureTrustWriter{}
 	manager.writer = second
-	if err := capturedTrust.Allow(context.Background(), entry); err != nil {
-		t.Fatalf("capturedTrust.Allow() with second writer error = %v", err)
+	if err := capturedReconciler.ReconcileHost(context.Background(), "api.github.com", []ebpf.TrustEntry{entry}); err != nil {
+		t.Fatalf("capturedReconciler.ReconcileHost() with second writer error = %v", err)
 	}
 	if second.calls != 1 {
 		t.Fatalf("second.calls = %d, want 1", second.calls)
 	}
 	if first.calls != 1 {
 		t.Fatalf("first.calls after swap = %d, want 1", first.calls)
+	}
+}
+
+func TestBuildComponentsLiveTrustReconcilerContinuesAfterAllowErrorAndUpdatesState(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := testConfig(t)
+	manager := &fakeEBPFManager{}
+
+	var capturedReconciler interface {
+		ReconcileHost(context.Context, string, []ebpf.TrustEntry) error
+	}
+	builders := componentBuilders{
+		newPolicy:         func([]string) (policyAllows, error) { return allowAllPolicy{}, nil },
+		validateInterface: func(string) error { return nil },
+		newEBPFManager: func(config.Config) (ebpfManagerLifecycle, error) {
+			return manager, nil
+		},
+		newRedirectManager: func(config.Config) (runtime.Lifecycle, error) {
+			return &fakeLifecycle{}, nil
+		},
+		newDNSProxy: func(cfg dnsProxyConfig) dns.Handler {
+			capturedReconciler = cfg.Reconciler
+			return dns.HandlerFunc(func(dns.ResponseWriter, *dns.Msg) {})
+		},
+		newDNSLifecycle: func(string, dns.Handler) runtime.Lifecycle {
+			return &fakeLifecycle{}
+		},
+		newMarkedDialer: func(uint32) (*net.Dialer, error) {
+			return &net.Dialer{}, nil
+		},
+	}
+
+	svc, err := buildComponents(cfg, logger, builders)
+	if err != nil {
+		t.Fatalf("buildComponents() error = %v", err)
+	}
+	reconcilerImpl, ok := capturedReconciler.(liveTrustReconciler)
+	if !ok {
+		t.Fatalf("capturedReconciler type = %T, want liveTrustReconciler", capturedReconciler)
+	}
+	reconcilerSync, ok := reconcilerImpl.sync.(*trustsync.Service)
+	if !ok {
+		t.Fatalf("live trust reconciler sync type = %T, want *trustsync.Service", reconcilerImpl.sync)
+	}
+	if svc.Trust != reconcilerSync {
+		t.Fatal("buildComponents() did not share trust service between reconciler and lifecycle")
+	}
+
+	boom := errors.New("allow failed")
+	writer := &recordingTrustWriter{
+		allowErrByKey: map[string]error{
+			"127.0.0.1:443": boom,
+		},
+	}
+	manager.writer = writer
+
+	entries := []ebpf.TrustEntry{
+		{
+			IPv4:      netip.MustParseAddr("127.0.0.1"),
+			Port:      443,
+			ExpiresAt: time.Now().Add(time.Minute),
+		},
+		{
+			IPv4:      netip.MustParseAddr("127.0.0.2"),
+			Port:      443,
+			ExpiresAt: time.Now().Add(time.Minute),
+		},
+	}
+
+	err = capturedReconciler.ReconcileHost(context.Background(), "api.github.com", entries)
+	if !errors.Is(err, boom) {
+		t.Fatalf("capturedReconciler.ReconcileHost() error = %v, want %v", err, boom)
+	}
+	if writer.allowCalls != 2 {
+		t.Fatalf("writer.allowCalls = %d, want 2", writer.allowCalls)
+	}
+	assertTrustState(t, reconcilerSync, trustsync.Destination{
+		IP:       netip.MustParseAddr("127.0.0.1"),
+		Port:     443,
+		Protocol: trustsync.ProtocolTCP,
+	}, trustsync.AggregateState{RefCount: 1})
+	assertTrustState(t, reconcilerSync, trustsync.Destination{
+		IP:       netip.MustParseAddr("127.0.0.2"),
+		Port:     443,
+		Protocol: trustsync.ProtocolTCP,
+	}, trustsync.AggregateState{RefCount: 1})
+}
+
+func TestBuildComponentsTrustLifecyclePrunesWithWriterDelete(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := testConfig(t)
+	manager := &fakeEBPFManager{}
+
+	var capturedReconciler interface {
+		ReconcileHost(context.Context, string, []ebpf.TrustEntry) error
+	}
+	builders := componentBuilders{
+		newPolicy:         func([]string) (policyAllows, error) { return allowAllPolicy{}, nil },
+		validateInterface: func(string) error { return nil },
+		newEBPFManager: func(config.Config) (ebpfManagerLifecycle, error) {
+			return manager, nil
+		},
+		newRedirectManager: func(config.Config) (runtime.Lifecycle, error) {
+			return &fakeLifecycle{}, nil
+		},
+		newDNSProxy: func(cfg dnsProxyConfig) dns.Handler {
+			capturedReconciler = cfg.Reconciler
+			return dns.HandlerFunc(func(dns.ResponseWriter, *dns.Msg) {})
+		},
+		newDNSLifecycle: func(string, dns.Handler) runtime.Lifecycle {
+			return &fakeLifecycle{}
+		},
+		newMarkedDialer: func(uint32) (*net.Dialer, error) {
+			return &net.Dialer{}, nil
+		},
+	}
+
+	svc, err := buildComponents(cfg, logger, builders)
+	if err != nil {
+		t.Fatalf("buildComponents() error = %v", err)
+	}
+	reconcilerImpl, ok := capturedReconciler.(liveTrustReconciler)
+	if !ok {
+		t.Fatalf("capturedReconciler type = %T, want liveTrustReconciler", capturedReconciler)
+	}
+	reconcilerSync := reconcilerImpl.sync.(*trustsync.Service)
+	if svc.Trust != reconcilerSync {
+		t.Fatal("buildComponents() did not share trust service between reconciler and lifecycle")
+	}
+
+	writer := &recordingTrustWriter{}
+	manager.writer = writer
+
+	dst := trustsync.Destination{
+		IP:       netip.MustParseAddr("127.0.0.3"),
+		Port:     443,
+		Protocol: trustsync.ProtocolUDP,
+	}
+	reconcilerSync.ReconcileHostAnswers("api.github.com", []trustsync.Destination{dst})
+	reconcilerSync.ReconcileHostAnswers("api.github.com", nil)
+	pruned := reconcilerSync.PruneStale()
+	if len(pruned) != 1 || pruned[0] != dst {
+		t.Fatalf("PruneStale() pruned %v, want [%v]", pruned, dst)
+	}
+	if writer.deleteCalls != 1 {
+		t.Fatalf("writer.deleteCalls = %d, want 1", writer.deleteCalls)
+	}
+}
+
+func TestDNSProxyConfigDoesNotExposeDirectTrustWriter(t *testing.T) {
+	if _, ok := reflect.TypeOf(dnsProxyConfig{}).FieldByName("Trust"); ok {
+		t.Fatal("dnsProxyConfig unexpectedly exposes Trust writer field")
 	}
 }
 
@@ -739,6 +916,51 @@ type captureTrustWriter struct {
 func (c *captureTrustWriter) Allow(context.Context, ebpf.TrustEntry) error {
 	c.calls++
 	return nil
+}
+
+type recordingTrustWriter struct {
+	allowCalls    int
+	deleteCalls   int
+	allowErrByKey map[string]error
+	deleteErrByKey map[string]error
+}
+
+func (w *recordingTrustWriter) Allow(_ context.Context, entry ebpf.TrustEntry) error {
+	w.allowCalls++
+	if err := w.allowErrByKey[trustEntryKey(entry)]; err != nil {
+		return err
+	}
+	return nil
+}
+
+func (w *recordingTrustWriter) Delete(_ context.Context, ipv4 netip.Addr, port uint16) error {
+	w.deleteCalls++
+	if err := w.deleteErrByKey[trustDestinationKey(ipv4, port)]; err != nil {
+		return err
+	}
+	return nil
+}
+
+func trustEntryKey(entry ebpf.TrustEntry) string {
+	return trustDestinationKey(entry.IPv4, entry.Port)
+}
+
+func trustDestinationKey(ip netip.Addr, port uint16) string {
+	return ip.String() + ":" + strconv.Itoa(int(port))
+}
+
+func assertTrustState(t *testing.T, svc *trustsync.Service, dst trustsync.Destination, want trustsync.AggregateState) {
+	t.Helper()
+	got, ok := svc.State(dst)
+	if !ok {
+		t.Fatalf("State(%v) missing", dst)
+	}
+	if got.RefCount != want.RefCount {
+		t.Fatalf("State(%v).RefCount = %d, want %d", dst, got.RefCount, want.RefCount)
+	}
+	if got.Stale != want.Stale {
+		t.Fatalf("State(%v).Stale = %v, want %v", dst, got.Stale, want.Stale)
+	}
 }
 
 type allowAllPolicy struct{}

@@ -16,7 +16,8 @@ import (
 )
 
 type fakeMap struct {
-	entries map[allowKey]allowValue
+	entries     map[allowKey]allowValue
+	deletedKeys []allowKey
 }
 
 func newFakeMap() *fakeMap {
@@ -29,6 +30,18 @@ func (m *fakeMap) Put(key allowKey, value allowValue) error {
 	m.entries[key] = value
 	return nil
 }
+
+func (m *fakeMap) Delete(key allowKey) error {
+	m.deletedKeys = append(m.deletedKeys, key)
+	delete(m.entries, key)
+	return nil
+}
+
+type allowOnlyTrustWriter struct{}
+
+func (allowOnlyTrustWriter) Allow(context.Context, TrustEntry) error { return nil }
+
+var _ TrustWriter = allowOnlyTrustWriter{}
 
 func TestPinnedPaths(t *testing.T) {
 	paths := PinnedPaths("/sys/fs/bpf/nie")
@@ -106,6 +119,40 @@ func TestAllowAcceptsExpiryEqualNow(t *testing.T) {
 		t.Fatal("IPv4 key not written to fake map")
 	} else if got.ExpiresAtMonoNs != 4242 {
 		t.Fatalf("expiry = %d, want %d", got.ExpiresAtMonoNs, 4242)
+	}
+}
+
+func TestDeleteRemovesOnlySpecificIPv4Port(t *testing.T) {
+	fake := newFakeMap()
+	now := func() time.Time { return time.Unix(1700000600, 0) }
+	writer := NewTrustWriter(fake, now)
+	deleter, ok := writer.(TrustDeleter)
+	if !ok {
+		t.Fatalf("NewTrustWriter() returned %T, which does not implement TrustDeleter", writer)
+	}
+
+	target := allowKey{Addr: [4]byte{203, 0, 113, 10}, Dport: 443}
+	keepSameIP := allowKey{Addr: [4]byte{203, 0, 113, 10}, Dport: 8443}
+	keepOtherIP := allowKey{Addr: [4]byte{203, 0, 113, 11}, Dport: 443}
+	fake.entries[target] = allowValue{ExpiresAtMonoNs: 1}
+	fake.entries[keepSameIP] = allowValue{ExpiresAtMonoNs: 2}
+	fake.entries[keepOtherIP] = allowValue{ExpiresAtMonoNs: 3}
+
+	err := deleter.Delete(context.Background(), netip.MustParseAddr("203.0.113.10"), 443)
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if _, ok := fake.entries[target]; ok {
+		t.Fatal("Delete() did not remove requested (IPv4,port) entry")
+	}
+	if _, ok := fake.entries[keepSameIP]; !ok {
+		t.Fatal("Delete() removed entry with same IPv4 but different port")
+	}
+	if _, ok := fake.entries[keepOtherIP]; !ok {
+		t.Fatal("Delete() removed entry with different IPv4")
+	}
+	if len(fake.deletedKeys) != 1 || fake.deletedKeys[0] != target {
+		t.Fatalf("deleted keys = %#v, want %#v", fake.deletedKeys, []allowKey{target})
 	}
 }
 
@@ -229,6 +276,10 @@ func TestManagerTrustWriterFailsBeforeStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TrustWriter() after Start() error = %v", err)
 	}
+	deleter, ok := writer.(TrustDeleter)
+	if !ok {
+		t.Fatalf("TrustWriter() after Start() returned %T, which does not implement TrustDeleter", writer)
+	}
 
 	err = writer.Allow(context.Background(), TrustEntry{
 		IPv4:      netip.MustParseAddr("203.0.113.10"),
@@ -241,6 +292,14 @@ func TestManagerTrustWriterFailsBeforeStart(t *testing.T) {
 	wantKey := allowKey{Addr: [4]byte{203, 0, 113, 10}, Dport: 0}
 	if _, ok := allowMap.entries[wantKey]; !ok {
 		t.Fatal("TrustWriter() did not write through to allow map")
+	}
+
+	err = deleter.Delete(context.Background(), netip.MustParseAddr("203.0.113.10"), 0)
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if _, ok := allowMap.entries[wantKey]; ok {
+		t.Fatal("TrustWriter().Delete() did not delete allow-map entry")
 	}
 }
 

@@ -134,8 +134,9 @@ Glob semantics:
 3. The proxy normalizes the queried hostname and matches it against `policy.allow`.
 4. In `enforce`, denied names are answered locally with `REFUSED`.
 5. In `audit`, denied names are still forwarded upstream and logged as `would_deny_dns`.
-6. Relevant A-record answers for the queried hostname, or for names reached through an in-answer CNAME chain, are converted into trusted IPv4 entries for the eBPF allow map only on configured intercepted HTTPS / MITM service ports.
-7. The tc egress program uses `dns.mark` as a bypass mark for proxy-originated DNS traffic.
+6. Relevant A-record answers for the queried hostname, or for names reached through an in-answer CNAME chain, are reconciled into trusted IPv4 entries for the eBPF allow map per hostname over time (not append-only) and only on configured intercepted HTTPS / MITM service ports.
+7. Cleanup is protocol-aware: stale UDP destinations age out by DNS lease timing, while stale TCP destinations are removed only after conntrack indicates no active flows, so old TCP destinations may remain trusted briefly while flows drain.
+8. The tc egress program uses `dns.mark` as a bypass mark for proxy-originated DNS traffic.
 
 ## Runtime Lifecycle
 

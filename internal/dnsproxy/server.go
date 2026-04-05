@@ -24,10 +24,12 @@ type ServerConfig struct {
 	TrustPlan interface {
 		PortsForHost(string) ([]uint16, bool)
 	}
-	Upstream Upstream
-	Trust    ebpf.TrustWriter
-	MaxTTL   time.Duration
-	Logger   *slog.Logger
+	Upstream   Upstream
+	Reconciler interface {
+		ReconcileHost(context.Context, string, []ebpf.TrustEntry) error
+	}
+	MaxTTL time.Duration
+	Logger *slog.Logger
 }
 
 type Server struct {
@@ -36,16 +38,14 @@ type Server struct {
 	trustPlan interface {
 		PortsForHost(string) ([]uint16, bool)
 	}
-	upstream Upstream
-	trust    ebpf.TrustWriter
-	maxTTL   time.Duration
-	logger   *slog.Logger
-	timeout  time.Duration
+	upstream   Upstream
+	reconciler interface {
+		ReconcileHost(context.Context, string, []ebpf.TrustEntry) error
+	}
+	maxTTL  time.Duration
+	logger  *slog.Logger
+	timeout time.Duration
 }
-
-type noopTrustWriterImpl struct{}
-
-func (noopTrustWriterImpl) Allow(context.Context, ebpf.TrustEntry) error { return nil }
 
 type denyAllPolicy struct{}
 
@@ -54,6 +54,10 @@ func (denyAllPolicy) Allows(string) bool { return false }
 type noopTrustPlanImpl struct{}
 
 func (noopTrustPlanImpl) PortsForHost(string) ([]uint16, bool) { return nil, false }
+
+type noopReconcilerImpl struct{}
+
+func (noopReconcilerImpl) ReconcileHost(context.Context, string, []ebpf.TrustEntry) error { return nil }
 
 func New(cfg ServerConfig) *Server {
 	l := cfg.Logger
@@ -66,11 +70,6 @@ func New(cfg ServerConfig) *Server {
 		maxTTL = 5 * time.Minute
 	}
 
-	tw := cfg.Trust
-	if tw == nil {
-		tw = noopTrustWriterImpl{}
-	}
-
 	p := cfg.Policy
 	if p == nil {
 		p = denyAllPolicy{}
@@ -80,16 +79,20 @@ func New(cfg ServerConfig) *Server {
 	if tp == nil {
 		tp = noopTrustPlanImpl{}
 	}
+	reconciler := cfg.Reconciler
+	if reconciler == nil {
+		reconciler = noopReconcilerImpl{}
+	}
 
 	return &Server{
-		mode:      cfg.Mode,
-		policy:    p,
-		trustPlan: tp,
-		upstream:  cfg.Upstream,
-		trust:     tw,
-		maxTTL:    maxTTL,
-		logger:    l,
-		timeout:   defaultUpstreamTimeout,
+		mode:       cfg.Mode,
+		policy:     p,
+		trustPlan:  tp,
+		upstream:   cfg.Upstream,
+		reconciler: reconciler,
+		maxTTL:     maxTTL,
+		logger:     l,
+		timeout:    defaultUpstreamTimeout,
 	}
 }
 
@@ -145,7 +148,7 @@ func (s *Server) exchangeUpstream(req *dns.Msg) *dns.Msg {
 }
 
 func (s *Server) learnARecords(host string, resp *dns.Msg) {
-	if resp == nil || s.trust == nil {
+	if resp == nil || s.reconciler == nil {
 		return
 	}
 	if resp.Rcode != dns.RcodeSuccess {
@@ -153,7 +156,7 @@ func (s *Server) learnARecords(host string, resp *dns.Msg) {
 	}
 
 	ports, ok := s.trustPlan.PortsForHost(host)
-	if !ok {
+	if !ok || len(ports) == 0 {
 		return
 	}
 	acceptedNames := acceptedAnswerNames(host, resp.Answer)
@@ -163,6 +166,12 @@ func (s *Server) learnARecords(host string, resp *dns.Msg) {
 
 	now := time.Now()
 	ctx := context.Background()
+	entries := make([]ebpf.TrustEntry, 0, len(resp.Answer)*len(ports))
+	type destinationKey struct {
+		ip   [4]byte
+		port uint16
+	}
+	seen := make(map[destinationKey]struct{})
 
 	for _, rr := range resp.Answer {
 		a, ok := rr.(*dns.A)
@@ -178,8 +187,17 @@ func (s *Server) learnARecords(host string, resp *dns.Msg) {
 			if err != nil {
 				continue
 			}
-			_ = s.trust.Allow(ctx, entry)
+			key := destinationKey{ip: entry.IPv4.As4(), port: entry.Port}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			entries = append(entries, entry)
 		}
+	}
+
+	if err := s.reconciler.ReconcileHost(ctx, host, entries); err != nil {
+		s.logger.Warn("reconcile_dns_trust", "host", host, "err", err)
 	}
 }
 

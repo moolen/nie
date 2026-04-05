@@ -20,6 +20,7 @@ import (
 	"github.com/moolen/nie/internal/policy"
 	"github.com/moolen/nie/internal/redirect"
 	"github.com/moolen/nie/internal/runtime"
+	"github.com/moolen/nie/internal/trustsync"
 )
 
 type policyAllows interface {
@@ -44,18 +45,52 @@ type componentBuilders struct {
 	validateInterface  func(iface string) error
 }
 
-type liveTrustWriter struct {
+type liveTrustReconciler struct {
+	source interface {
+		TrustWriter() (ebpf.TrustWriter, error)
+	}
+	sync interface {
+		ReconcileHostAnswers(host string, destinations []trustsync.Destination)
+	}
+}
+
+type liveTrustDeleter struct {
 	source interface {
 		TrustWriter() (ebpf.TrustWriter, error)
 	}
 }
 
-func (w liveTrustWriter) Allow(ctx context.Context, entry ebpf.TrustEntry) error {
-	writer, err := w.source.TrustWriter()
+func (r liveTrustReconciler) ReconcileHost(ctx context.Context, host string, entries []ebpf.TrustEntry) error {
+	writer, err := r.source.TrustWriter()
 	if err != nil {
 		return err
 	}
-	return writer.Allow(ctx, entry)
+	destinations := make([]trustsync.Destination, 0, len(entries))
+	var firstErr error
+	for _, entry := range entries {
+		if err := writer.Allow(ctx, entry); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		destinations = append(destinations, trustsync.Destination{
+			IP:       entry.IPv4,
+			Port:     entry.Port,
+			Protocol: trustsync.ProtocolTCP,
+		})
+	}
+	r.sync.ReconcileHostAnswers(host, destinations)
+	return firstErr
+}
+
+func (d liveTrustDeleter) DeleteDestination(ctx context.Context, dst trustsync.Destination) error {
+	writer, err := d.source.TrustWriter()
+	if err != nil {
+		return err
+	}
+	deleter, ok := writer.(ebpf.TrustDeleter)
+	if !ok {
+		return fmt.Errorf("trust writer does not support delete")
+	}
+	return deleter.Delete(ctx, dst.IP, dst.Port)
 }
 
 func buildComponents(cfg config.Config, logger *slog.Logger, builders componentBuilders) (runtime.Service, error) {
@@ -97,6 +132,13 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 	trustPlan, err := policy.NewTrustPlan(cfg.Policy.Allow, httpsTrustedPorts(cfg.HTTPS.Ports), mitmTrustRules(cfg.HTTPS.MITM.Rules))
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("build dns trust plan: %w", err)
+	}
+	trustService := trustsync.New(trustsync.ServiceConfig{
+		Deleter: liveTrustDeleter{source: ebpfMgr},
+	})
+	trustReconciler := liveTrustReconciler{
+		source: ebpfMgr,
+		sync:   trustService,
 	}
 	httpPolicy, err := httppolicy.New(mitmHTTPRules(cfg.HTTPS.MITM.Rules))
 	if err != nil {
@@ -152,18 +194,19 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 	}
 
 	dnsHandler := builders.newDNSProxy(dnsProxyConfig{
-		Mode:      cfg.Mode,
-		Policy:    p,
-		TrustPlan: trustPlan,
-		Upstream:  upstream,
-		Trust:     liveTrustWriter{source: ebpfMgr},
-		Logger:    logger,
+		Mode:       cfg.Mode,
+		Policy:     p,
+		TrustPlan:  trustPlan,
+		Upstream:   upstream,
+		Reconciler: trustReconciler,
+		Logger:     logger,
 	})
 	dnsLC := builders.newDNSLifecycle(cfg.DNS.Listen, dnsHandler)
 
 	return runtime.Service{
 		Redirect: redirectMgr,
 		EBPF:     ebpfMgr,
+		Trust:    trustService,
 		DNS:      dnsLC,
 		HTTPS:    httpsService,
 	}, ebpfMgr, nil

@@ -10,6 +10,7 @@ type Lifecycle interface {
 type Service struct {
 	Redirect Lifecycle
 	EBPF     Lifecycle
+	Trust    Lifecycle
 	DNS      Lifecycle
 	HTTPS    Lifecycle
 }
@@ -28,6 +29,13 @@ func (s Service) Start(ctx context.Context) error {
 			return err
 		}
 		started = append(started, s.EBPF)
+	}
+	if s.Trust != nil {
+		if err := s.Trust.Start(ctx); err != nil {
+			rollback()
+			return err
+		}
+		started = append(started, s.Trust)
 	}
 	if s.DNS != nil {
 		if err := s.DNS.Start(ctx); err != nil {
@@ -68,6 +76,11 @@ func (s Service) Stop(ctx context.Context) error {
 	}
 	if s.DNS != nil {
 		if err := s.DNS.Stop(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.Trust != nil {
+		if err := s.Trust.Stop(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

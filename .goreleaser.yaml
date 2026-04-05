@@ -2,10 +2,16 @@ version: 2
 
 project_name: nie
 
+before:
+  hooks:
+    - go mod tidy
+
 builds:
   - id: nie
     main: ./cmd/nie
     binary: nie
+    env:
+      - CGO_ENABLED=0
     goos:
       - linux
     goarch:
@@ -18,7 +24,7 @@ archives:
       - nie
     formats:
       - tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{- if eq .Arch \"amd64\" }}x86_64{{- else if eq .Arch \"arm64\" }}arm64{{- else }}{{ .Arch }}{{- end }}"
     files:
       - README.md
       - config.yaml
@@ -27,5 +33,8 @@ checksum:
   name_template: checksums.txt
 
 release:
+  github:
+    owner: moolen
+    name: nie
   mode: keep-existing
   replace_existing_artifacts: true

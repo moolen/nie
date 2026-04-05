@@ -14,10 +14,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -41,15 +41,22 @@ jobs:
           version: "~> v2"
           args: check --config .goreleaser.yaml
 
+      - name: Validate GoReleaser snapshot release
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean --config .goreleaser.yaml
+
   smoke:
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -62,4 +69,4 @@ jobs:
       - name: Run root smoke test against built binary
         run: |
           sudo env "PATH=$PATH" "NIE_TEST_BIN=$PWD/dist/nie" \
-            go test -tags=integration ./test -run TestSmoke_AuditModeAllowsUnknownTrafficButEmitsWouldDeny -count=1 -v
+            go test -tags=integration ./test -run 'TestSmoke_(AuditModeAllowsUnknownTrafficButEmitsWouldDeny|EnforceBlocksUnknownTrafficUntilDNSLearning)' -count=1 -v

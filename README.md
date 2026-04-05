@@ -22,23 +22,97 @@ The daemon does not use shell-out `iptables`/`tc` orchestration for normal start
 
 ## Configuration
 
-`config.yaml` uses explicit `host:port` DNS listener addresses, a single interface, and glob-based hostname policy:
+`config.yaml` uses explicit `host:port` listener addresses, a single interface, glob-based hostname policy, HTTPS interception policy, and optional outbound ICMP policy:
 
 ```yaml
 mode: enforce
 interface: eth0
+
 dns:
   listen: 127.0.0.1:1053
   upstreams:
     - 1.1.1.1:53
+    - 9.9.9.9:53
   mark: 4242
+
 policy:
   default: deny
   allow:
     - github.com
     - "*.github.com"
     - "**.githubusercontent.com"
+  cidr_allow:
+    - cidr: 10.0.0.0/8
+      protocol: tcp
+      ports:
+        - 443
+        - 8443
+        - 10000-10100
+    - cidr: 10.20.0.0/16
+      protocol: udp
+      ports:
+        - 53
+        - 123
+    - cidr: 10.30.0.0/16
+      protocol: any
+    - cidr: 10.40.0.0/16
+      protocol: icmp
+      icmp:
+        allow:
+          - echo-request
+          - type: 3
+            code: 4
+
+https:
+  listen: 127.0.0.1:9443
+  ports:
+    - 443
+    - 8443
+  sni:
+    missing: deny
+  ca:
+    cert_file: /var/lib/nie/ca/root.crt
+    key_file: /var/lib/nie/ca/root.key
+  mitm:
+    default: deny
+    rules:
+      - host: api.github.com
+        port: 443
+        methods:
+          - GET
+          - HEAD
+        paths:
+          - /meta
+          - /repos/**
+        action: allow
+      - host: uploads.github.com
+        port: 443
+        methods:
+          - POST
+        paths:
+          - /repos/**/releases
+        action: audit
+
+icmp:
+  outbound:
+    default: deny
+    allow:
+      - echo-request
+      - type: 3
+        code: 4
 ```
+
+If `icmp.outbound` is omitted, NIE keeps the current trust-based ICMP behavior. When
+it is present, outbound ICMPv4 is decided only by the ICMP policy. `default: audit`
+allows unmatched ICMP but emits `would_deny_egress` logs with `icmp_type`,
+`icmp_code`, and `icmp_metadata_valid`.
+
+`policy.cidr_allow` is a direct egress allow path for IPv4 CIDRs. Matching CIDR
+rules take precedence over DNS-learned hostname trust. `protocol: any` is broad
+and intentionally unqualified. Matching CIDR rules only bypass HTTPS MITM for
+allowed TCP flows to configured intercepted HTTPS ports; UDP to those ports
+still follows the existing non-HTTP deny/audit path. For non-matching non-CIDR
+traffic, `enforce` still drops by default and `audit` still allows and logs.
 
 Glob semantics:
 
@@ -69,6 +143,12 @@ Glob semantics:
 - `enforce`: default deny. Unknown or untrusted egress should be dropped, and denied DNS queries are refused locally.
 - `audit`: allow traffic but emit `would_deny_dns` and `would_deny_egress` logs for flows that would have been blocked.
 
+## ICMP Notes
+
+- `icmp.outbound` is outbound-only.
+- It applies only to ICMPv4. ICMPv6 and NDP are unchanged by this policy surface.
+- PMTU-related behavior is expected to remain unaffected because inbound ICMP handling is out of scope.
+
 ## Privileges
 
 Run `nie` as root for now. Native nftables and tc/BPF lifecycle operations require elevated privileges, and the integration smoke test is root-gated. A future packaging pass can narrow this to the exact capability set.
@@ -83,14 +163,18 @@ Run `nie` as root for now. Native nftables and tc/BPF lifecycle operations requi
 
 ## Release Contract
 
-GoReleaser configuration lives in `.goreleaser.yaml` and is intentionally scoped to
-artifact packaging only.
+Releases are cut automatically from `main`.
+
+- `fix:` -> patch
+- `feat:` -> minor
+- `BREAKING CHANGE:` or `type!` -> major
+- artifacts are published for Linux `amd64` and `arm64` with GoReleaser
 
 - project name is `nie`
 - build target is `./cmd/nie`
 - builds are Linux-only (`amd64`, `arm64`)
 - archives are `tar.gz` with stable names:
-  `nie_<version>_linux_<arch>.tar.gz`
+  `nie_linux_x86_64.tar.gz` and `nie_linux_arm64.tar.gz`
 - each archive includes `README.md` and `config.yaml`
 - checksum output is `checksums.txt`
 - release notes ownership stays with semantic-release via

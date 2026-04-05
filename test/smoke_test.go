@@ -3,6 +3,7 @@
 package test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -10,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -369,6 +372,70 @@ func TestSmoke_EnforceKeepsActiveTCPFlowAcrossDNSRotationAndEventuallyPrunesStal
 
 	waitForPinnedStateAfterExit(t, "/sys/fs/bpf/nie", false)
 	waitForNieRedirectStateAfterExit(t, false)
+}
+
+func TestExtractAuditedDomains(t *testing.T) {
+	logs := strings.Join([]string{
+		`time=2026-04-05T00:00:00Z level=INFO msg=would_deny_dns host=registry.npmjs.org.`,
+		`time=2026-04-05T00:00:01Z level=INFO msg=would_deny_dns host=proxy.golang.org.`,
+		`time=2026-04-05T00:00:02Z level=INFO msg=would_deny_https host=AUTH.DOCKER.IO`,
+		`time=2026-04-05T00:00:03Z level=INFO msg=would_deny_egress proto=tcp dst=203.0.113.10 port=443`,
+		`time=2026-04-05T00:00:04Z level=INFO msg=would_deny_https host=registry-1.docker.io`,
+		`time=2026-04-05T00:00:05Z level=INFO msg=would_deny_dns host=registry.npmjs.org.`,
+	}, "\n")
+
+	got := sortedDomainSet(extractAuditedDomains(logs))
+	want := []string{
+		"auth.docker.io",
+		"proxy.golang.org",
+		"registry-1.docker.io",
+		"registry.npmjs.org",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sortedDomainSet(extractAuditedDomains()) = %v, want %v", got, want)
+	}
+}
+
+func extractAuditedDomains(logs string) map[string]struct{} {
+	domains := make(map[string]struct{})
+	scanner := bufio.NewScanner(strings.NewReader(logs))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.Contains(line, "would_deny_dns") && !strings.Contains(line, "would_deny_https") {
+			continue
+		}
+		host, ok := logFieldValue(line, "host=")
+		if !ok {
+			continue
+		}
+		host = strings.TrimSuffix(strings.ToLower(host), ".")
+		if host == "" {
+			continue
+		}
+		domains[host] = struct{}{}
+	}
+	return domains
+}
+
+func sortedDomainSet(set map[string]struct{}) []string {
+	domains := make([]string, 0, len(set))
+	for domain := range set {
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	return domains
+}
+
+func logFieldValue(line, key string) (string, bool) {
+	idx := strings.Index(line, key)
+	if idx < 0 {
+		return "", false
+	}
+	value := line[idx+len(key):]
+	if end := strings.IndexByte(value, ' '); end >= 0 {
+		value = value[:end]
+	}
+	return value, value != ""
 }
 
 type lockedBuffer struct {

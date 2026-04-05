@@ -282,18 +282,19 @@ func TestPersistentTCPEchoProbeKeepsConnectionAliveAcrossExchanges(t *testing.T)
 	}
 }
 
-func TestWaitForBooleanOracleWaitsForWantedState(t *testing.T) {
-	waitCh := make(chan error)
-	logs := &lockedBuffer{}
-	calls := 0
+func TestWaitForBlockedProbeAcceptsDelayedBlockedOutcome(t *testing.T) {
+	attempts := 0
 
-	waitForBooleanOracle(t, 500*time.Millisecond, "flow drained", true, waitCh, logs, func() (bool, error) {
-		calls++
-		return calls >= 3, nil
+	waitForBlockedProbe(t, 500*time.Millisecond, func() string {
+		attempts++
+		if attempts < 3 {
+			return "success"
+		}
+		return "timeout"
 	})
 
-	if calls != 3 {
-		t.Fatalf("oracle calls = %d, want 3", calls)
+	if attempts != 3 {
+		t.Fatalf("probe attempts = %d, want 3", attempts)
 	}
 }
 

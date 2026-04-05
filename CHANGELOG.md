@@ -1,3 +1,20 @@
+# [1.2.0](https://github.com/moolen/nie/compare/v1.1.0...v1.2.0) (2026-04-05)
+
+
+### Bug Fixes
+
+* avoid stale trust refresh races ([78b6828](https://github.com/moolen/nie/commit/78b6828c0acfd03c641816718becb7b55416bd3a))
+* clamp retained trust refresh ttl ([e6c050c](https://github.com/moolen/nie/commit/e6c050cb30a052ba6e306fdd4a2331ec056ee207))
+* keep retained trust entries alive in datapath ([32a8864](https://github.com/moolen/nie/commit/32a8864a69ea93b16751c15284dba18c870dbb64))
+* only refresh retained stale trust entries ([4f11a11](https://github.com/moolen/nie/commit/4f11a11d62ade62295eeb7c728edf9379b71c023))
+* qualify trust duration parse errors ([8a62814](https://github.com/moolen/nie/commit/8a62814c6e413b855d491ded67062dbd725648a8))
+
+
+### Features
+
+* add trust cleanup config ([fca8ccf](https://github.com/moolen/nie/commit/fca8ccfb9228055072897a935a52a5a63c1e562c))
+* wire trust cleanup config into runtime ([e7146e4](https://github.com/moolen/nie/commit/e7146e451722a477925e05509753b162c9c5eec8))
+
 # [1.1.0](https://github.com/moolen/nie/compare/v1.0.4...v1.1.0) (2026-04-05)
 
 

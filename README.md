@@ -161,13 +161,13 @@ Run `nie` as root for now. Native nftables and tc/BPF lifecycle operations requi
 - `make test-integration`: run the root-gated smoke test with `sudo -E go test -tags=integration ./test/...`
 - `make vm-test`: boot or reprovision the Vagrant VM and run the mounted repo validation flow inside the guest
 
-## Release Contract
+## Releases
 
 Releases are cut automatically from `main`.
 
 - `fix:` -> patch
 - `feat:` -> minor
-- `BREAKING CHANGE:` or `type!` -> major
+- `BREAKING CHANGE:` or `type!:` -> major
 - artifacts are published for Linux `amd64` and `arm64` with GoReleaser
 
 - project name is `nie`

@@ -2,10 +2,6 @@ version: 2
 
 project_name: nie
 
-before:
-  hooks:
-    - go mod tidy
-
 builds:
   - id: nie
     main: ./cmd/nie

@@ -76,6 +76,10 @@ func TestProxy_DeniesMissingSNIInEnforceMode(t *testing.T) {
 			clientConn, serverConn := net.Pipe()
 			defer clientConn.Close()
 
+			if err := clientConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				t.Fatalf("clientConn.SetReadDeadline() error = %v", err)
+			}
+
 			done := make(chan error, 1)
 			go func() {
 				done <- proxy.HandleClassifiedConnection(context.Background(), ClassifiedConn{
@@ -85,9 +89,6 @@ func TestProxy_DeniesMissingSNIInEnforceMode(t *testing.T) {
 				})
 			}()
 
-			if err := clientConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-				t.Fatalf("clientConn.SetReadDeadline() error = %v", err)
-			}
 			_, err := clientConn.Read(make([]byte, 1))
 			if err == nil {
 				t.Fatal("client read error = nil, want closed connection")
@@ -112,6 +113,10 @@ func TestProxy_MissingSNIInAuditMode(t *testing.T) {
 		clientConn, serverConn := net.Pipe()
 		defer clientConn.Close()
 
+		if err := clientConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatalf("clientConn.SetReadDeadline() error = %v", err)
+		}
+
 		done := make(chan error, 1)
 		go func() {
 			done <- proxy.HandleClassifiedConnection(context.Background(), ClassifiedConn{
@@ -121,9 +126,6 @@ func TestProxy_MissingSNIInAuditMode(t *testing.T) {
 			})
 		}()
 
-		if err := clientConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-			t.Fatalf("clientConn.SetReadDeadline() error = %v", err)
-		}
 		_, err := clientConn.Read(make([]byte, 1))
 		if err == nil {
 			t.Fatal("client read error = nil, want closed connection")

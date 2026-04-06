@@ -509,6 +509,7 @@ func TestSmoke_AuditCapturesPinnedDockerBuildDomainsWithoutHTTPSInterception(t *
 	t.Cleanup(func() {
 		pruneDockerState(t)
 	})
+	restartDockerDaemon(t)
 
 	root := repoRoot(t)
 	tmpDir := t.TempDir()

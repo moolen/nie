@@ -1,3 +1,10 @@
+## [1.2.2](https://github.com/moolen/nie/compare/v1.2.1...v1.2.2) (2026-04-06)
+
+
+### Bug Fixes
+
+* harden docker audit smoke coverage ([93a167e](https://github.com/moolen/nie/commit/93a167ef8556514fd4fcba63480933afe55ca0f0))
+
 ## [1.2.1](https://github.com/moolen/nie/compare/v1.2.0...v1.2.1) (2026-04-05)
 
 

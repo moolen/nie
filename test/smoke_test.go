@@ -23,6 +23,7 @@ import (
 	"github.com/google/nftables"
 	"github.com/miekg/dns"
 
+	"github.com/moolen/nie/internal/mitm"
 	"github.com/moolen/nie/internal/netx"
 )
 
@@ -30,6 +31,7 @@ const (
 	spectreRepoURL   = "https://github.com/moolen/spectre"
 	spectrePinnedRev = "e49f8e0899616842cff5441bc4d9ee10c0667f20"
 	nieRootCAPath    = "/var/lib/nie/ca/root.crt"
+	nieRootCAKeyPath = "/var/lib/nie/ca/root.key"
 )
 
 var spectreRequiredDomains = []string{
@@ -37,7 +39,6 @@ var spectreRequiredDomains = []string{
 	"registry-1.docker.io",
 	"registry.npmjs.org",
 	"proxy.golang.org",
-	"sum.golang.org",
 	"dl-cdn.alpinelinux.org",
 }
 
@@ -396,10 +397,21 @@ func TestSmoke_AuditCapturesPinnedDockerBuildDomains(t *testing.T) {
 	}
 
 	requireDockerAvailable(t)
+	pruneDockerState(t)
+	t.Cleanup(func() {
+		pruneDockerState(t)
+	})
 
 	root := repoRoot(t)
 	tmpDir := t.TempDir()
 	cleanupStaleNieRedirectState(t)
+	iface := defaultRouteInterface(t)
+	restoreIPv6 := disableIPv6OnInterface(t, iface)
+	t.Cleanup(restoreIPv6)
+	ensureNIERootCA(t)
+	restoreHostTrust := installHostCATrust(t, nieRootCAPath)
+	t.Cleanup(restoreHostTrust)
+	restartDockerDaemon(t)
 
 	binPath := resolveNieBinary(t, root, tmpDir)
 	listenAddr := pickFreeListenAddr(t)
@@ -407,7 +419,7 @@ func TestSmoke_AuditCapturesPinnedDockerBuildDomains(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	writeConfig(t, configPath, writeConfigOptions{
 		mode:            "audit",
-		iface:           defaultRouteInterface(t),
+		iface:           iface,
 		listenAddr:      listenAddr,
 		httpsListenAddr: httpsListenAddr,
 		upstreamAddr:    "1.1.1.1:53",
@@ -439,10 +451,6 @@ func TestSmoke_AuditCapturesPinnedDockerBuildDomains(t *testing.T) {
 
 	waitForPinnedState(t, "/sys/fs/bpf/nie", true, waitCh, &logs)
 	waitForNieRedirectState(t, true, waitCh, &logs)
-	waitForFile(t, nieRootCAPath, waitCh, &logs)
-
-	restoreHostTrust := installHostCATrust(t, nieRootCAPath)
-	t.Cleanup(restoreHostTrust)
 
 	repoDir := checkoutPinnedSpectre(t, tmpDir)
 	patchSpectreDockerfileForSmokeTrust(t, repoDir, nieRootCAPath)
@@ -452,9 +460,18 @@ func TestSmoke_AuditCapturesPinnedDockerBuildDomains(t *testing.T) {
 		_, _ = exec.Command("docker", "rmi", "-f", imageTag).CombinedOutput()
 	})
 
-	build := exec.CommandContext(ctx, "docker", "build", "--progress=plain", "-t", imageTag, ".")
+	buildArgs := []string{"build", "--network", "host", "--no-cache", "--pull", "-t", imageTag, "."}
+	buildEnv := os.Environ()
+	if dockerBuildxAvailable() {
+		buildArgs = []string{"build", "--network", "host", "--no-cache", "--pull", "--progress=plain", "-t", imageTag, "."}
+		buildEnv = append(buildEnv, "DOCKER_BUILDKIT=1")
+	} else {
+		t.Log("docker buildx unavailable; falling back to legacy docker build")
+	}
+
+	build := exec.CommandContext(ctx, "docker", buildArgs...)
 	build.Dir = repoDir
-	build.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
+	build.Env = buildEnv
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("docker build spectre: %v\n%s\nnie logs=%s", err, output, logs.String())
 	}
@@ -482,11 +499,118 @@ func TestSmoke_AuditCapturesPinnedDockerBuildDomains(t *testing.T) {
 	waitForNieRedirectStateAfterExit(t, false)
 }
 
+func TestSmoke_AuditCapturesPinnedDockerBuildDomainsWithoutHTTPSInterception(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root")
+	}
+
+	requireDockerAvailable(t)
+	pruneDockerState(t)
+	t.Cleanup(func() {
+		pruneDockerState(t)
+	})
+
+	root := repoRoot(t)
+	tmpDir := t.TempDir()
+	cleanupStaleNieRedirectState(t)
+	iface := defaultRouteInterface(t)
+	restoreIPv6 := disableIPv6OnInterface(t, iface)
+	t.Cleanup(restoreIPv6)
+
+	binPath := resolveNieBinary(t, root, tmpDir)
+	listenAddr := pickFreeListenAddr(t)
+	httpsListenAddr := pickFreeTCPAddr(t)
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeConfig(t, configPath, writeConfigOptions{
+		mode:            "audit",
+		iface:           iface,
+		listenAddr:      listenAddr,
+		httpsListenAddr: httpsListenAddr,
+		upstreamAddr:    "1.1.1.1:53",
+		httpsPorts:      []int{7443},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binPath, "-config", configPath)
+	cmd.Dir = root
+
+	var logs lockedBuffer
+	cmd.Stdout = &logs
+	cmd.Stderr = &logs
+
+	waitCh := make(chan error, 1)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start nie: %v", err)
+	}
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = terminateNieProcess(cmd, waitCh, &logs)
+		}
+	})
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	waitForPinnedState(t, "/sys/fs/bpf/nie", true, waitCh, &logs)
+	waitForNieRedirectState(t, true, waitCh, &logs)
+
+	repoDir := checkoutPinnedSpectre(t, tmpDir)
+
+	imageTag := fmt.Sprintf("nie-smoke-spectre-no-https-intercept:%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_, _ = exec.Command("docker", "rmi", "-f", imageTag).CombinedOutput()
+	})
+
+	buildArgs := []string{"build", "--network", "host", "--no-cache", "--pull", "-t", imageTag, "."}
+	buildEnv := os.Environ()
+	if dockerBuildxAvailable() {
+		buildArgs = []string{"build", "--network", "host", "--no-cache", "--pull", "--progress=plain", "-t", imageTag, "."}
+		buildEnv = append(buildEnv, "DOCKER_BUILDKIT=1")
+	} else {
+		t.Log("docker buildx unavailable; falling back to legacy docker build")
+	}
+
+	build := exec.CommandContext(ctx, "docker", buildArgs...)
+	build.Dir = repoDir
+	build.Env = buildEnv
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("docker build spectre without https interception: %v\n%s\nnie logs=%s", err, output, logs.String())
+	}
+
+	if err := terminateNieProcess(cmd, waitCh, &logs); err != nil {
+		t.Fatalf("wait for nie exit: %v; logs=%s", err, logs.String())
+	}
+	stopped = true
+
+	if lines := findLogLinesContaining(logs.String(), "would_deny_https"); len(lines) != 0 {
+		t.Fatalf("unexpected https audit logs without https interception: %v", lines)
+	}
+
+	observed := extractAuditedDomains(logs.String())
+	missing := missingDomains(observed, spectreRequiredDomains)
+	if len(missing) != 0 {
+		t.Fatalf("missing audited dns domains %v; observed=%v; logs=%s", missing, sortedDomainSet(observed), logs.String())
+	}
+
+	for _, line := range findLogLinesContaining(logs.String(), "would_deny_dns") {
+		t.Logf("nie: %s", line)
+	}
+	t.Logf("observed audited domains without https interception: %v", sortedDomainSet(observed))
+
+	waitForPinnedStateAfterExit(t, "/sys/fs/bpf/nie", false)
+	waitForNieRedirectStateAfterExit(t, false)
+}
+
 func TestExtractAuditedDomains(t *testing.T) {
 	logs := strings.Join([]string{
 		`time=2026-04-05T00:00:00Z level=INFO msg=would_deny_dns host=registry.npmjs.org.`,
 		`time=2026-04-05T00:00:01Z level=INFO msg=would_deny_dns host=proxy.golang.org.`,
 		`time=2026-04-05T00:00:02Z level=INFO msg=would_deny_https host=AUTH.DOCKER.IO`,
+		`2026/04/05 22:57:07 INFO would_deny_https reason=https_default host=registry-1.docker.io port=443 method=GET path=/v2/ action=deny`,
+		`2026/04/05 22:57:10 INFO would_deny_dns host=dl-cdn.alpinelinux.org`,
 		`time=2026-04-05T00:00:02Z level=INFO msg=would_deny_dnsx host=ignored.example.com`,
 		`time=2026-04-05T00:00:03Z level=INFO msg=would_deny_egress proto=tcp dst=203.0.113.10 port=443`,
 		`time=2026-04-05T00:00:04Z level=INFO msg=would_deny_https host=registry-1.docker.io`,
@@ -497,6 +621,7 @@ func TestExtractAuditedDomains(t *testing.T) {
 	got := sortedDomainSet(extractAuditedDomains(logs))
 	want := []string{
 		"auth.docker.io",
+		"dl-cdn.alpinelinux.org",
 		"proxy.golang.org",
 		"registry-1.docker.io",
 		"registry.npmjs.org",
@@ -528,7 +653,7 @@ func extractAuditedDomains(logs string) map[string]struct{} {
 	scanner := bufio.NewScanner(strings.NewReader(logs))
 	for scanner.Scan() {
 		line := scanner.Text()
-		msg, ok := logFieldValue(line, "msg=")
+		msg, ok := logMessageName(line)
 		if !ok || (msg != "would_deny_dns" && msg != "would_deny_https") {
 			continue
 		}
@@ -543,6 +668,18 @@ func extractAuditedDomains(logs string) map[string]struct{} {
 		domains[host] = struct{}{}
 	}
 	return domains
+}
+
+func logMessageName(line string) (string, bool) {
+	if msg, ok := logFieldValue(line, "msg="); ok {
+		return msg, true
+	}
+	for _, field := range strings.Fields(line) {
+		if field == "would_deny_dns" || field == "would_deny_https" {
+			return field, true
+		}
+	}
+	return "", false
 }
 
 func sortedDomainSet(set map[string]struct{}) []string {
@@ -596,6 +733,48 @@ func parseDefaultRouteInterface(output string) (string, error) {
 	return "", errors.New("default route interface not found")
 }
 
+func disableIPv6OnInterface(t *testing.T, iface string) func() {
+	t.Helper()
+
+	key := fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6", iface)
+	previousOutput, err := exec.Command("sysctl", "-n", key).CombinedOutput()
+	if err != nil {
+		t.Fatalf("read %s: %v\n%s", key, err, previousOutput)
+	}
+	previous := strings.TrimSpace(string(previousOutput))
+
+	setDisabled := func(value string) {
+		output, err := exec.Command("sysctl", "-q", "-w", key+"="+value).CombinedOutput()
+		if err != nil {
+			t.Fatalf("set %s=%s: %v\n%s", key, value, err, output)
+		}
+	}
+
+	setDisabled("1")
+
+	deadline := time.Now().Add(5 * time.Second)
+	var lastOutput []byte
+	for time.Now().Before(deadline) {
+		output, err := exec.Command("ip", "-6", "addr", "show", "dev", iface).CombinedOutput()
+		if err != nil {
+			t.Fatalf("ip -6 addr show dev %s: %v\n%s", iface, err, output)
+		}
+		lastOutput = output
+		if !strings.Contains(string(output), "inet6 ") {
+			return func() {
+				setDisabled(previous)
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for IPv6 addresses to clear on %s\n%s", iface, lastOutput)
+
+	return func() {
+		setDisabled(previous)
+	}
+}
+
 func checkoutPinnedSpectre(t *testing.T, dir string) string {
 	t.Helper()
 
@@ -625,6 +804,57 @@ func requireDockerAvailable(t *testing.T) {
 	cmd := exec.Command("docker", "info")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("docker unavailable: %v\n%s", err, output)
+	}
+}
+
+func dockerBuildxAvailable() bool {
+	cmd := exec.Command("docker", "buildx", "version")
+	return cmd.Run() == nil
+}
+
+func restartDockerDaemon(t *testing.T) {
+	t.Helper()
+
+	output, err := exec.Command("systemctl", "restart", "docker").CombinedOutput()
+	if err != nil {
+		t.Fatalf("restart docker: %v\n%s", err, output)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	var lastOutput []byte
+	for time.Now().Before(deadline) {
+		output, err := exec.Command("docker", "info").CombinedOutput()
+		lastOutput = output
+		if err == nil {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for docker after restart\n%s", lastOutput)
+}
+
+func pruneDockerState(t *testing.T) {
+	t.Helper()
+
+	if output, err := exec.Command("docker", "system", "prune", "-af", "--volumes").CombinedOutput(); err != nil {
+		t.Fatalf("docker system prune: %v\n%s", err, output)
+	}
+	if dockerBuildxAvailable() {
+		if output, err := exec.Command("docker", "builder", "prune", "-af").CombinedOutput(); err != nil {
+			t.Fatalf("docker builder prune: %v\n%s", err, output)
+		}
+	}
+}
+
+func ensureNIERootCA(t *testing.T) {
+	t.Helper()
+
+	if _, err := mitm.EnsureCA(mitm.CAPaths{
+		CertFile: nieRootCAPath,
+		KeyFile:  nieRootCAKeyPath,
+	}); err != nil {
+		t.Fatalf("ensure nie root ca: %v", err)
 	}
 }
 
@@ -704,8 +934,8 @@ func patchSpectreDockerfileForSmokeTrust(t *testing.T, repoDir, caPath string) {
 
 	patched := string(raw)
 	replacements := map[string]string{
-		"WORKDIR /ui-build\n": "WORKDIR /ui-build\nCOPY " + certName + " /tmp/" + certName + "\nRUN cat /tmp/" + certName + " >> /etc/ssl/certs/ca-certificates.crt\n",
-		"WORKDIR /build\n":    "WORKDIR /build\nCOPY " + certName + " /tmp/" + certName + "\nRUN cat /tmp/" + certName + " >> /etc/ssl/certs/ca-certificates.crt\n",
+		"WORKDIR /ui-build\n": "WORKDIR /ui-build\nCOPY " + certName + " /tmp/" + certName + "\nRUN cat /tmp/" + certName + " >> /etc/ssl/certs/ca-certificates.crt\nENV NODE_OPTIONS=--dns-result-order=ipv4first\nENV NODE_EXTRA_CA_CERTS=/tmp/" + certName + "\nENV npm_config_cafile=/tmp/" + certName + "\n",
+		"WORKDIR /build\n":    "WORKDIR /build\nCOPY " + certName + " /tmp/" + certName + "\nRUN cat /tmp/" + certName + " >> /etc/ssl/certs/ca-certificates.crt\nENV GODEBUG=http2client=0\n",
 		"WORKDIR /app\n":      "WORKDIR /app\nCOPY " + certName + " /tmp/" + certName + "\nRUN cat /tmp/" + certName + " >> /etc/ssl/certs/ca-certificates.crt\n",
 	}
 	for needle, replacement := range replacements {
@@ -915,6 +1145,7 @@ type writeConfigOptions struct {
 	iface              string
 	listenAddr         string
 	httpsListenAddr    string
+	httpsPorts         []int
 	upstreamAddr       string
 	allowHosts         []string
 	trustMaxStaleHold  string
@@ -940,6 +1171,15 @@ func writeConfig(t *testing.T, path string, opts writeConfigOptions) {
 		}
 	}
 
+	httpsPorts := opts.httpsPorts
+	if len(httpsPorts) == 0 {
+		httpsPorts = []int{443, 8443}
+	}
+	var httpsPortsSection strings.Builder
+	for _, port := range httpsPorts {
+		httpsPortsSection.WriteString(fmt.Sprintf("    - %d\n", port))
+	}
+
 	raw := fmt.Sprintf(`mode: %s
 interface: %s
 dns:
@@ -954,9 +1194,7 @@ policy:
 %shttps:
   listen: %s
   ports:
-    - 443
-    - 8443
-`, opts.mode, opts.iface, opts.listenAddr, opts.upstreamAddr, allowSection, trustSection, opts.httpsListenAddr)
+%s`, opts.mode, opts.iface, opts.listenAddr, opts.upstreamAddr, allowSection, trustSection, opts.httpsListenAddr, httpsPortsSection.String())
 
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)

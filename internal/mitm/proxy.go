@@ -50,8 +50,10 @@ type ProxyDependencies struct {
 	LeafCertificates interface {
 		CertificateForHost(string) (*tls.Certificate, error)
 	}
-	OpenUpstreamTLS func(context.Context, string, netip.AddrPort) (net.Conn, error)
-	OpenUpstreamTCP func(context.Context, netip.AddrPort) (net.Conn, error)
+	OpenUpstreamTLS      func(context.Context, string, netip.AddrPort) (net.Conn, error)
+	OpenUpstreamHTTP1TLS func(context.Context, string, netip.AddrPort) (net.Conn, error)
+	OpenUpstreamHTTP2TLS func(context.Context, string, netip.AddrPort) (net.Conn, error)
+	OpenUpstreamTCP      func(context.Context, netip.AddrPort) (net.Conn, error)
 }
 
 type Proxy struct {
@@ -66,10 +68,11 @@ type Proxy struct {
 	leafCertificates interface {
 		CertificateForHost(string) (*tls.Certificate, error)
 	}
-	openUpstreamTLS func(context.Context, string, netip.AddrPort) (net.Conn, error)
-	openUpstreamTCP func(context.Context, netip.AddrPort) (net.Conn, error)
-	idleTimeout     time.Duration
-	maxHeaderBytes  int
+	openUpstreamHTTP1TLS func(context.Context, string, netip.AddrPort) (net.Conn, error)
+	openUpstreamHTTP2TLS func(context.Context, string, netip.AddrPort) (net.Conn, error)
+	openUpstreamTCP      func(context.Context, netip.AddrPort) (net.Conn, error)
+	idleTimeout          time.Duration
+	maxHeaderBytes       int
 }
 
 type denyAllHostnamePolicy struct{}
@@ -84,7 +87,9 @@ func NewProxy(cfg ProxyConfig, deps ProxyDependencies) (*Proxy, error) {
 		return nil, errors.New("leaf certificate cache must not be nil")
 	}
 	if deps.OpenUpstreamTLS == nil {
-		return nil, errors.New("upstream tls opener must not be nil")
+		if deps.OpenUpstreamHTTP1TLS == nil || deps.OpenUpstreamHTTP2TLS == nil {
+			return nil, errors.New("upstream tls opener must not be nil")
+		}
 	}
 
 	switch cfg.MissingSNIAction {
@@ -116,18 +121,30 @@ func NewProxy(cfg ProxyConfig, deps ProxyDependencies) (*Proxy, error) {
 		hostnamePolicy = denyAllHostnamePolicy{}
 	}
 
+	openUpstreamHTTP1TLS := deps.OpenUpstreamHTTP1TLS
+	openUpstreamHTTP2TLS := deps.OpenUpstreamHTTP2TLS
+	if deps.OpenUpstreamTLS != nil {
+		if openUpstreamHTTP1TLS == nil {
+			openUpstreamHTTP1TLS = deps.OpenUpstreamTLS
+		}
+		if openUpstreamHTTP2TLS == nil {
+			openUpstreamHTTP2TLS = deps.OpenUpstreamTLS
+		}
+	}
+
 	return &Proxy{
-		mode:             cfg.Mode,
-		missingSNIAction: cfg.MissingSNIAction,
-		defaultAction:    cfg.DefaultAction,
-		logger:           logger,
-		mitmPolicy:       deps.MITMPolicy,
-		hostnamePolicy:   hostnamePolicy,
-		leafCertificates: deps.LeafCertificates,
-		openUpstreamTLS:  deps.OpenUpstreamTLS,
-		openUpstreamTCP:  deps.OpenUpstreamTCP,
-		idleTimeout:      idleTimeout,
-		maxHeaderBytes:   maxHeaderBytes,
+		mode:                 cfg.Mode,
+		missingSNIAction:     cfg.MissingSNIAction,
+		defaultAction:        cfg.DefaultAction,
+		logger:               logger,
+		mitmPolicy:           deps.MITMPolicy,
+		hostnamePolicy:       hostnamePolicy,
+		leafCertificates:     deps.LeafCertificates,
+		openUpstreamHTTP1TLS: openUpstreamHTTP1TLS,
+		openUpstreamHTTP2TLS: openUpstreamHTTP2TLS,
+		openUpstreamTCP:      deps.OpenUpstreamTCP,
+		idleTimeout:          idleTimeout,
+		maxHeaderBytes:       maxHeaderBytes,
 	}, nil
 }
 
@@ -169,10 +186,16 @@ func (p *Proxy) handleHTTP1Connection(ctx context.Context, downstream net.Conn, 
 	var (
 		upstream       net.Conn
 		upstreamReader *bufio.Reader
+		h2Upstream     *http2.ClientConn
 	)
 	defer func() {
 		if upstream != nil {
 			_ = upstream.Close()
+		}
+	}()
+	defer func() {
+		if h2Upstream != nil {
+			_ = h2Upstream.Close()
 		}
 	}()
 
@@ -209,24 +232,54 @@ func (p *Proxy) handleHTTP1Connection(ctx context.Context, downstream net.Conn, 
 		}
 		closeAfterRequest := requestWantsClose(req)
 
-		if upstream == nil {
-			upstream, err = p.openUpstreamTLS(ctx, host, destination)
+		if upstream == nil && h2Upstream == nil {
+			rawUpstream, err := p.openUpstreamHTTP1TLS(ctx, host, destination)
 			if err != nil {
 				_ = req.Body.Close()
 				return fmt.Errorf("open upstream tls connection for %q: %w", host, err)
 			}
-			upstream = withIdleTimeout(upstream, p.idleTimeout)
-			upstreamReader = bufio.NewReaderSize(upstream, p.readerBufferSize())
+			if negotiatedProtocol(rawUpstream) == "h2" {
+				transport := &http2.Transport{}
+				h2Upstream, err = transport.NewClientConn(withIdleTimeout(rawUpstream, p.idleTimeout))
+				if err != nil {
+					_ = req.Body.Close()
+					_ = rawUpstream.Close()
+					return fmt.Errorf("initialize upstream http2 client for %q: %w", host, err)
+				}
+			} else {
+				upstream = withIdleTimeout(rawUpstream, p.idleTimeout)
+				upstreamReader = bufio.NewReaderSize(upstream, p.readerBufferSize())
+			}
+		}
+		_ = req.Body.Close()
+
+		if h2Upstream != nil {
+			upstreamReq := req.Clone(req.Context())
+			upstreamReq.RequestURI = ""
+			upstreamReq.URL = cloneUpstreamURL(req.URL, host)
+			upstreamReq.Host = req.Host
+
+			resp, err := h2Upstream.RoundTrip(upstreamReq)
+			if err != nil {
+				return fmt.Errorf("round trip upstream http2 request for %q: %w", host, err)
+			}
+			if err := resp.Write(downstream); err != nil {
+				_ = resp.Body.Close()
+				return fmt.Errorf("forward downstream http response for %q: %w", host, err)
+			}
+			_ = resp.Body.Close()
+			if closeAfterRequest {
+				return nil
+			}
+			continue
 		}
 
 		if err := req.Write(upstream); err != nil {
-			_ = req.Body.Close()
 			_ = upstream.Close()
 			upstream = nil
 			upstreamReader = nil
 			return fmt.Errorf("forward upstream http request for %q: %w", host, err)
 		}
-		_ = req.Body.Close()
 
 		resp, err := http.ReadResponse(upstreamReader, req)
 		if err != nil {
@@ -258,7 +311,7 @@ func (p *Proxy) handleHTTP1Connection(ctx context.Context, downstream net.Conn, 
 }
 
 func (p *Proxy) handleHTTP2Connection(ctx context.Context, downstream net.Conn, host string, destination netip.AddrPort) error {
-	upstream := newHTTP2UpstreamRoundTripper(host, destination, p.openUpstreamTLS)
+	upstream := newHTTP2UpstreamRoundTripper(host, destination, p.openUpstreamHTTP2TLS)
 	defer upstream.Close()
 
 	var (

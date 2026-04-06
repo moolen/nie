@@ -1,3 +1,10 @@
+## [1.2.3](https://github.com/moolen/nie/compare/v1.2.2...v1.2.3) (2026-04-06)
+
+
+### Bug Fixes
+
+* stabilize docker smoke ci ([bb11fc8](https://github.com/moolen/nie/commit/bb11fc87d07b10a75add1f2594e41d48b691cbbc))
+
 ## [1.2.2](https://github.com/moolen/nie/compare/v1.2.1...v1.2.2) (2026-04-06)
 
 

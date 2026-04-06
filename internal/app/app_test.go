@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"log/slog"
@@ -64,6 +65,21 @@ func TestValidateProtectedInterfaceRejectsUnsupportedAddressType(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported address type") {
 		t.Fatalf("validateProtectedInterfaceAddrs() error = %q, want unsupported address type", err)
+	}
+}
+
+func TestUpstreamTLSConfigAdvertisesHTTP2AndHTTP11(t *testing.T) {
+	cfg := upstreamTLSConfig("registry-1.docker.io")
+
+	if cfg.ServerName != "registry-1.docker.io" {
+		t.Fatalf("ServerName = %q, want %q", cfg.ServerName, "registry-1.docker.io")
+	}
+	if cfg.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("MinVersion = %v, want %v", cfg.MinVersion, tls.VersionTLS12)
+	}
+	want := []string{"h2", "http/1.1"}
+	if !reflect.DeepEqual(cfg.NextProtos, want) {
+		t.Fatalf("NextProtos = %v, want %v", cfg.NextProtos, want)
 	}
 }
 

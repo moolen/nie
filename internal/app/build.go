@@ -67,6 +67,22 @@ type liveTrustRefresher struct {
 	}
 }
 
+func upstreamTLSConfig(serverName string) *tls.Config {
+	return &tls.Config{
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"h2", "http/1.1"},
+	}
+}
+
+func upstreamHTTP1TLSConfig(serverName string) *tls.Config {
+	return &tls.Config{
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"http/1.1"},
+	}
+}
+
 func (r liveTrustReconciler) ReconcileHost(ctx context.Context, host string, entries []ebpf.TrustEntry) error {
 	writer, err := r.source.TrustWriter()
 	if err != nil {
@@ -183,16 +199,24 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 		MITMPolicy:       httpPolicy,
 		HostnamePolicy:   p,
 		LeafCertificates: leafCache,
-		OpenUpstreamTLS: func(ctx context.Context, serverName string, destination netip.AddrPort) (net.Conn, error) {
+		OpenUpstreamHTTP1TLS: func(ctx context.Context, serverName string, destination netip.AddrPort) (net.Conn, error) {
 			rawConn, err := markedDialer.DialContext(ctx, "tcp", destination.String())
 			if err != nil {
 				return nil, err
 			}
-			tlsConn := tls.Client(rawConn, &tls.Config{
-				ServerName: serverName,
-				MinVersion: tls.VersionTLS12,
-				NextProtos: []string{"h2", "http/1.1"},
-			})
+			tlsConn := tls.Client(rawConn, upstreamHTTP1TLSConfig(serverName))
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				_ = rawConn.Close()
+				return nil, err
+			}
+			return tlsConn, nil
+		},
+		OpenUpstreamHTTP2TLS: func(ctx context.Context, serverName string, destination netip.AddrPort) (net.Conn, error) {
+			rawConn, err := markedDialer.DialContext(ctx, "tcp", destination.String())
+			if err != nil {
+				return nil, err
+			}
+			tlsConn := tls.Client(rawConn, upstreamTLSConfig(serverName))
 			if err := tlsConn.HandshakeContext(ctx); err != nil {
 				_ = rawConn.Close()
 				return nil, err

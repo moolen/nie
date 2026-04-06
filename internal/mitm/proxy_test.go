@@ -477,6 +477,283 @@ func TestProxy_HandlesMultipleRequestsOnOneConnection(t *testing.T) {
 	}
 }
 
+func TestProxy_HTTP1DownstreamFallsBackFromHTTP2OnlyUpstream(t *testing.T) {
+	logger, _ := testLogger()
+	proxy := newTestProxy(t, testProxyOptions{
+		logger: logger,
+		mitmRules: []httppolicy.Rule{
+			{
+				Host:    "registry-1.docker.io",
+				Port:    443,
+				Methods: []string{"GET"},
+				Paths:   []string{"/v2/"},
+				Action:  httppolicy.ActionAllow,
+			},
+		},
+		upstreamResponseBody: "registry-ok",
+		upstreamHTTP2:        true,
+	})
+
+	statusCode, body, _, err := roundTripHTTPSRequest(t, proxy, roundTripConfig{
+		serverName: "registry-1.docker.io",
+		hostHeader: "registry-1.docker.io",
+		method:     http.MethodGet,
+		path:       "/v2/",
+	})
+	if err != nil {
+		t.Fatalf("roundTripHTTPSRequest() error = %v", err)
+	}
+	if statusCode != http.StatusOK {
+		t.Fatalf("response status = %d, want 200", statusCode)
+	}
+	if body != "registry-ok" {
+		t.Fatalf("response body = %q, want %q", body, "registry-ok")
+	}
+}
+
+func TestProxy_HTTP1DownstreamKeepsHTTP2UpstreamAliveAcrossRequests(t *testing.T) {
+	logger, _ := testLogger()
+	proxy := newTestProxy(t, testProxyOptions{
+		logger: logger,
+		mitmRules: []httppolicy.Rule{
+			{
+				Host:    "dl-cdn.alpinelinux.org",
+				Port:    443,
+				Methods: []string{"GET"},
+				Paths:   []string{"/alpine/v3.23/main/x86_64/APKINDEX.tar.gz", "/alpine/v3.23/community/x86_64/APKINDEX.tar.gz"},
+				Action:  httppolicy.ActionAllow,
+			},
+		},
+		upstreamResponseBody: strings.Repeat("apk-index\n", 128),
+		upstreamHTTP2:        true,
+	})
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- proxy.HandleClassifiedConnection(context.Background(), ClassifiedConn{
+			Conn:                serverConn,
+			OriginalDestination: netip.MustParseAddrPort("203.0.113.10:443"),
+			ClientHello:         ClientHello{ServerName: "dl-cdn.alpinelinux.org"},
+		})
+	}()
+
+	clientTLS := tls.Client(clientConn, &tls.Config{
+		ServerName: "dl-cdn.alpinelinux.org",
+		RootCAs:    proxy.testRootCAs(),
+		MinVersion: tls.VersionTLS12,
+	})
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatalf("clientTLS.Handshake() error = %v", err)
+	}
+
+	reader := bufio.NewReader(clientTLS)
+	for _, path := range []string{
+		"/alpine/v3.23/main/x86_64/APKINDEX.tar.gz",
+		"/alpine/v3.23/community/x86_64/APKINDEX.tar.gz",
+	} {
+		reqText := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: dl-cdn.alpinelinux.org\r\n\r\n", path)
+		if _, err := io.WriteString(clientTLS, reqText); err != nil {
+			t.Fatalf("write request for %s: %v", path, err)
+		}
+		resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodGet})
+		if err != nil {
+			t.Fatalf("read response for %s: %v", path, err)
+		}
+		if body := readResponseBody(t, resp); body != strings.Repeat("apk-index\n", 128) {
+			t.Fatalf("response body for %s = %q, want repeated apk index payload", path, body)
+		}
+	}
+
+	_ = clientConn.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("HandleClassifiedConnection() error = %v", err)
+	}
+	if proxy.upstreamDialCount() != 1 {
+		t.Fatalf("upstream dial count = %d, want 1", proxy.upstreamDialCount())
+	}
+}
+
+func TestProxy_HTTP1DownstreamUsesDedicatedHTTP1UpstreamTLSDialer(t *testing.T) {
+	logger, _ := testLogger()
+	authority := newProxyTestAuthority(t)
+	leafCache := NewLeafCache(authority, func() time.Time { return time.Now().UTC() })
+	httpPolicy, err := httppolicy.New([]httppolicy.Rule{{
+		Host:    "dl-cdn.alpinelinux.org",
+		Port:    443,
+		Methods: []string{"GET"},
+		Paths:   []string{"/"},
+		Action:  httppolicy.ActionAllow,
+	}})
+	if err != nil {
+		t.Fatalf("httppolicy.New() error = %v", err)
+	}
+
+	var http1Calls, http2Calls int
+	http1Recorder := &recordingUpstream{
+		responseBody:     "http1",
+		leafCertificates: leafCache,
+		requests:         make(chan *http.Request, 1),
+	}
+	http2Recorder := &recordingUpstream{
+		responseBody:     "http2",
+		http2:            true,
+		leafCertificates: leafCache,
+		requests:         make(chan *http.Request, 1),
+	}
+
+	proxy, err := NewProxy(ProxyConfig{
+		Mode:             config.ModeEnforce,
+		MissingSNIAction: httppolicy.ActionDeny,
+		DefaultAction:    httppolicy.ActionDeny,
+	}, ProxyDependencies{
+		Logger:           logger,
+		MITMPolicy:       httpPolicy,
+		LeafCertificates: leafCache,
+		OpenUpstreamHTTP1TLS: func(ctx context.Context, serverName string, destination netip.AddrPort) (net.Conn, error) {
+			http1Calls++
+			return http1Recorder.dialTLS(ctx, serverName, destination)
+		},
+		OpenUpstreamHTTP2TLS: func(ctx context.Context, serverName string, destination netip.AddrPort) (net.Conn, error) {
+			http2Calls++
+			return http2Recorder.dialTLS(ctx, serverName, destination)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewProxy() error = %v", err)
+	}
+
+	statusCode, body, _, err := roundTripHTTPSRequest(t, &testProxy{
+		Proxy:     proxy,
+		authority: authority,
+		upstream:  http1Recorder,
+	}, roundTripConfig{
+		serverName: "dl-cdn.alpinelinux.org",
+		hostHeader: "dl-cdn.alpinelinux.org",
+		method:     http.MethodGet,
+		path:       "/",
+	})
+	if err != nil {
+		t.Fatalf("roundTripHTTPSRequest() error = %v", err)
+	}
+	if statusCode != http.StatusOK {
+		t.Fatalf("response status = %d, want 200", statusCode)
+	}
+	if body != "http1" {
+		t.Fatalf("response body = %q, want %q", body, "http1")
+	}
+	if http1Calls != 1 {
+		t.Fatalf("http1 upstream calls = %d, want 1", http1Calls)
+	}
+	if http2Calls != 0 {
+		t.Fatalf("http2 upstream calls = %d, want 0", http2Calls)
+	}
+}
+
+func TestProxy_HTTP2DownstreamUsesDedicatedHTTP2UpstreamTLSDialer(t *testing.T) {
+	logger, _ := testLogger()
+	authority := newProxyTestAuthority(t)
+	leafCache := NewLeafCache(authority, func() time.Time { return time.Now().UTC() })
+	httpPolicy, err := httppolicy.New([]httppolicy.Rule{{
+		Host:    "api.github.com",
+		Port:    443,
+		Methods: []string{"GET"},
+		Paths:   []string{"/allowed"},
+		Action:  httppolicy.ActionAllow,
+	}})
+	if err != nil {
+		t.Fatalf("httppolicy.New() error = %v", err)
+	}
+
+	var http1Calls, http2Calls int
+	http1Recorder := &recordingUpstream{
+		responseBody:     "http1",
+		leafCertificates: leafCache,
+		requests:         make(chan *http.Request, 1),
+	}
+	http2Recorder := &recordingUpstream{
+		responseBody:     "http2",
+		http2:            true,
+		leafCertificates: leafCache,
+		requests:         make(chan *http.Request, 1),
+	}
+
+	proxy, err := NewProxy(ProxyConfig{
+		Mode:             config.ModeEnforce,
+		MissingSNIAction: httppolicy.ActionDeny,
+		DefaultAction:    httppolicy.ActionDeny,
+	}, ProxyDependencies{
+		Logger:           logger,
+		MITMPolicy:       httpPolicy,
+		LeafCertificates: leafCache,
+		OpenUpstreamHTTP1TLS: func(ctx context.Context, serverName string, destination netip.AddrPort) (net.Conn, error) {
+			http1Calls++
+			return http1Recorder.dialTLS(ctx, serverName, destination)
+		},
+		OpenUpstreamHTTP2TLS: func(ctx context.Context, serverName string, destination netip.AddrPort) (net.Conn, error) {
+			http2Calls++
+			return http2Recorder.dialTLS(ctx, serverName, destination)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewProxy() error = %v", err)
+	}
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- proxy.HandleClassifiedConnection(context.Background(), ClassifiedConn{
+			Conn:                serverConn,
+			OriginalDestination: netip.MustParseAddrPort("203.0.113.10:443"),
+			ClientHello:         ClientHello{ServerName: "api.github.com"},
+		})
+	}()
+
+	clientTLS := tls.Client(clientConn, &tls.Config{
+		ServerName: "api.github.com",
+		RootCAs:    func() *x509.CertPool { pool := x509.NewCertPool(); pool.AddCert(authority.Cert); return pool }(),
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"h2"},
+	})
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatalf("clientTLS.Handshake() error = %v", err)
+	}
+
+	h2Transport := &http2.Transport{}
+	h2Conn, err := h2Transport.NewClientConn(clientTLS)
+	if err != nil {
+		t.Fatalf("http2.Transport.NewClientConn() error = %v", err)
+	}
+	defer h2Transport.CloseIdleConnections()
+
+	req, err := http.NewRequest(http.MethodGet, "https://api.github.com/allowed", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	resp, err := h2Conn.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	if body := readResponseBody(t, resp); body != "http2" {
+		t.Fatalf("response body = %q, want %q", body, "http2")
+	}
+
+	_ = clientConn.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("HandleClassifiedConnection() error = %v", err)
+	}
+	if http2Calls != 1 {
+		t.Fatalf("http2 upstream calls = %d, want 1", http2Calls)
+	}
+	if http1Calls != 0 {
+		t.Fatalf("http1 upstream calls = %d, want 0", http1Calls)
+	}
+}
+
 func TestProxy_TimesOutStalledDownstreamConnection(t *testing.T) {
 	logger, _ := testLogger()
 	proxy := newTestProxy(t, testProxyOptions{

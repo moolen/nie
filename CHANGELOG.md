@@ -1,3 +1,10 @@
+# [1.4.0](https://github.com/moolen/nie/compare/v1.3.1...v1.4.0) (2026-04-07)
+
+
+### Features
+
+* migrate cli to cobra and make https optional ([0403f08](https://github.com/moolen/nie/commit/0403f08964a7de836af92342f2ba8174fa01c143))
+
 ## [1.3.1](https://github.com/moolen/nie/compare/v1.3.0...v1.3.1) (2026-04-07)
 
 

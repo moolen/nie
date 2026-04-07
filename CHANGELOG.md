@@ -1,3 +1,10 @@
+## [1.3.1](https://github.com/moolen/nie/compare/v1.3.0...v1.3.1) (2026-04-07)
+
+
+### Bug Fixes
+
+* update integration configs for selector shape ([f8c5814](https://github.com/moolen/nie/commit/f8c5814a906225d7d92e20f592919836f8cd3d69))
+
 # [1.3.0](https://github.com/moolen/nie/compare/v1.2.3...v1.3.0) (2026-04-07)
 
 

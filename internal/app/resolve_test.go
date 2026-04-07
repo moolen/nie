@@ -3,10 +3,12 @@ package app
 import (
 	"context"
 	"errors"
+	"net"
 	"reflect"
 	"testing"
 
 	"github.com/moolen/nie/internal/config"
+	"github.com/vishvananda/netlink"
 )
 
 func TestResolveRuntimeConfig_InterfaceExplicitUsesConfiguredName(t *testing.T) {
@@ -57,6 +59,41 @@ func TestResolveRuntimeConfig_InterfaceAutoRejectsMultipleInterfaces(t *testing.
 	})
 	if err == nil {
 		t.Fatal("resolveRuntimeConfig() error = nil, want non-nil")
+	}
+}
+
+func TestDefaultRouteDetectorTreatsZeroCIDRAsDefaultRoute(t *testing.T) {
+	detector := defaultRouteDetector{
+		listRoutes: func(netlink.Link, int) ([]netlink.Route, error) {
+			return []netlink.Route{
+				{
+					LinkIndex: 2,
+					Dst: &net.IPNet{
+						IP:   net.IPv4zero,
+						Mask: net.CIDRMask(0, 32),
+					},
+				},
+			}, nil
+		},
+		linkByIndex: func(index int) (netlink.Link, error) {
+			if index != 2 {
+				t.Fatalf("linkByIndex() index = %d, want 2", index)
+			}
+			return &netlink.Dummy{
+				LinkAttrs: netlink.LinkAttrs{
+					Index: 2,
+					Name:  "ens5",
+				},
+			}, nil
+		},
+	}
+
+	ifaces, err := detector.DefaultRouteInterfaces(context.Background())
+	if err != nil {
+		t.Fatalf("DefaultRouteInterfaces() error = %v", err)
+	}
+	if got, want := ifaces, []string{"ens5"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("DefaultRouteInterfaces() = %v, want %v", got, want)
 	}
 }
 

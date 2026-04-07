@@ -141,7 +141,7 @@ func (d defaultRouteDetector) DefaultRouteInterfaces(_ context.Context) ([]strin
 	}
 	ifaces := make([]string, 0, len(routes))
 	for _, route := range routes {
-		if route.Dst != nil {
+		if !isIPv4DefaultRoute(route) {
 			continue
 		}
 		if route.LinkIndex > 0 {
@@ -163,6 +163,21 @@ func (d defaultRouteDetector) DefaultRouteInterfaces(_ context.Context) ([]strin
 		}
 	}
 	return ifaces, nil
+}
+
+func isIPv4DefaultRoute(route netlink.Route) bool {
+	if route.Dst == nil {
+		return true
+	}
+	if route.Dst.IP == nil {
+		return false
+	}
+	ip := route.Dst.IP.To4()
+	if ip == nil || !ip.Equal(net.IPv4zero) {
+		return false
+	}
+	ones, bits := route.Dst.Mask.Size()
+	return bits == 32 && ones == 0
 }
 
 func routeLinkName(linkByIndex func(int) (netlink.Link, error), index int) (string, error) {

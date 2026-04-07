@@ -56,6 +56,43 @@ func TestManagerStartInstallsDNSAndHTTPSRedirects(t *testing.T) {
 	}
 }
 
+func TestManagerStartInstallsDNSRedirectsOnlyWhenHTTPSDisabled(t *testing.T) {
+	fakeBackend := &fakeNFTBackend{}
+	manager, err := NewManager(Config{
+		DNSListenPort: 1053,
+		Mark:          4242,
+	}, Dependencies{
+		Detector: &fakeCapabilityDetector{
+			capabilities: HostCapabilities{NFTables: true},
+		},
+		Backend: fakeBackend,
+	})
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	if len(fakeBackend.installCalls) != 1 {
+		t.Fatalf("install call count = %d, want 1", len(fakeBackend.installCalls))
+	}
+	want := []RedirectRule{
+		{Protocol: protocolUDP, DestinationPort: 53, ListenPort: 1053, BypassMark: 4242},
+		{Protocol: protocolTCP, DestinationPort: 53, ListenPort: 1053, BypassMark: 4242},
+	}
+	if got := fakeBackend.installCalls[0].Redirects; len(got) != len(want) {
+		t.Fatalf("redirect rule count = %d, want %d", len(got), len(want))
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("redirect[%d] = %+v, want %+v", i, got[i], want[i])
+			}
+		}
+	}
+}
+
 func TestManagerStartInstallsBypassAwareRedirects(t *testing.T) {
 	fakeBackend := &fakeNFTBackend{}
 	manager, err := NewManager(testManagerConfig(), Dependencies{

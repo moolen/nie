@@ -24,6 +24,8 @@ import (
 	"github.com/moolen/nie/internal/trustsync"
 )
 
+var defaultTLSTrustPorts = []uint16{443, 8443}
+
 type policyAllows interface {
 	Allows(string) bool
 }
@@ -179,7 +181,7 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 		return runtime.Service{}, nil, fmt.Errorf("build redirect manager: %w", err)
 	}
 
-	trustPlan, err := policy.NewTrustPlan(runtimeCfg.Policy.Allow, httpsTrustedPorts(runtimeCfg.HTTPS.Ports), mitmTrustRules(runtimeCfg.HTTPS.MITM.Rules))
+	trustPlan, err := policy.NewTrustPlan(runtimeCfg.Policy.Allow, trustPortsForConfig(runtimeCfg), mitmTrustRulesForConfig(runtimeCfg))
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("build dns trust plan: %w", err)
 	}
@@ -193,65 +195,68 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 		source: ebpfMgr,
 		sync:   trustService,
 	}
-	httpPolicy, err := httppolicy.New(mitmHTTPRules(runtimeCfg.HTTPS.MITM.Rules))
-	if err != nil {
-		return runtime.Service{}, nil, fmt.Errorf("build https mitm policy: %w", err)
-	}
-	authority, err := mitm.EnsureCA(mitm.CAPaths{
-		CertFile: runtimeCfg.HTTPS.CA.CertFile,
-		KeyFile:  runtimeCfg.HTTPS.CA.KeyFile,
-	})
-	if err != nil {
-		return runtime.Service{}, nil, fmt.Errorf("ensure https mitm ca: %w", err)
-	}
-	leafCache := mitm.NewLeafCache(authority, nil)
-	httpsProxy, err := mitm.NewProxy(mitm.ProxyConfig{
-		Mode:             runtimeCfg.Mode,
-		MissingSNIAction: httppolicy.Action(runtimeCfg.HTTPS.SNI.Missing),
-		DefaultAction:    httppolicy.Action(runtimeCfg.HTTPS.MITM.Default),
-	}, mitm.ProxyDependencies{
-		Logger:           logger,
-		MITMPolicy:       httpPolicy,
-		HostnamePolicy:   p,
-		LeafCertificates: leafCache,
-		OpenUpstreamHTTP1TLS: func(ctx context.Context, serverName string, destination netip.AddrPort) (net.Conn, error) {
-			rawConn, err := markedDialer.DialContext(ctx, "tcp", destination.String())
-			if err != nil {
-				return nil, err
-			}
-			tlsConn := tls.Client(rawConn, upstreamHTTP1TLSConfig(serverName))
-			if err := tlsConn.HandshakeContext(ctx); err != nil {
-				_ = rawConn.Close()
-				return nil, err
-			}
-			return tlsConn, nil
-		},
-		OpenUpstreamHTTP2TLS: func(ctx context.Context, serverName string, destination netip.AddrPort) (net.Conn, error) {
-			rawConn, err := markedDialer.DialContext(ctx, "tcp", destination.String())
-			if err != nil {
-				return nil, err
-			}
-			tlsConn := tls.Client(rawConn, upstreamTLSConfig(serverName))
-			if err := tlsConn.HandshakeContext(ctx); err != nil {
-				_ = rawConn.Close()
-				return nil, err
-			}
-			return tlsConn, nil
-		},
-		OpenUpstreamTCP: func(ctx context.Context, destination netip.AddrPort) (net.Conn, error) {
-			return markedDialer.DialContext(ctx, "tcp", destination.String())
-		},
-	})
-	if err != nil {
-		return runtime.Service{}, nil, fmt.Errorf("build https proxy: %w", err)
-	}
-	httpsService, err := mitm.NewService(mitm.ServiceConfig{
-		ListenAddr: runtimeCfg.HTTPS.Listen,
-	}, mitm.ServiceDependencies{
-		Handler: httpsProxy,
-	})
-	if err != nil {
-		return runtime.Service{}, nil, fmt.Errorf("build https service: %w", err)
+	var httpsService runtime.Lifecycle
+	if runtimeCfg.HTTPS.Configured() {
+		httpPolicy, err := httppolicy.New(mitmHTTPRules(runtimeCfg.HTTPS.MITM.Rules))
+		if err != nil {
+			return runtime.Service{}, nil, fmt.Errorf("build https mitm policy: %w", err)
+		}
+		authority, err := mitm.EnsureCA(mitm.CAPaths{
+			CertFile: runtimeCfg.HTTPS.CA.CertFile,
+			KeyFile:  runtimeCfg.HTTPS.CA.KeyFile,
+		})
+		if err != nil {
+			return runtime.Service{}, nil, fmt.Errorf("ensure https mitm ca: %w", err)
+		}
+		leafCache := mitm.NewLeafCache(authority, nil)
+		httpsProxy, err := mitm.NewProxy(mitm.ProxyConfig{
+			Mode:             runtimeCfg.Mode,
+			MissingSNIAction: httppolicy.Action(runtimeCfg.HTTPS.SNI.Missing),
+			DefaultAction:    httppolicy.Action(runtimeCfg.HTTPS.MITM.Default),
+		}, mitm.ProxyDependencies{
+			Logger:           logger,
+			MITMPolicy:       httpPolicy,
+			HostnamePolicy:   p,
+			LeafCertificates: leafCache,
+			OpenUpstreamHTTP1TLS: func(ctx context.Context, serverName string, destination netip.AddrPort) (net.Conn, error) {
+				rawConn, err := markedDialer.DialContext(ctx, "tcp", destination.String())
+				if err != nil {
+					return nil, err
+				}
+				tlsConn := tls.Client(rawConn, upstreamHTTP1TLSConfig(serverName))
+				if err := tlsConn.HandshakeContext(ctx); err != nil {
+					_ = rawConn.Close()
+					return nil, err
+				}
+				return tlsConn, nil
+			},
+			OpenUpstreamHTTP2TLS: func(ctx context.Context, serverName string, destination netip.AddrPort) (net.Conn, error) {
+				rawConn, err := markedDialer.DialContext(ctx, "tcp", destination.String())
+				if err != nil {
+					return nil, err
+				}
+				tlsConn := tls.Client(rawConn, upstreamTLSConfig(serverName))
+				if err := tlsConn.HandshakeContext(ctx); err != nil {
+					_ = rawConn.Close()
+					return nil, err
+				}
+				return tlsConn, nil
+			},
+			OpenUpstreamTCP: func(ctx context.Context, destination netip.AddrPort) (net.Conn, error) {
+				return markedDialer.DialContext(ctx, "tcp", destination.String())
+			},
+		})
+		if err != nil {
+			return runtime.Service{}, nil, fmt.Errorf("build https proxy: %w", err)
+		}
+		httpsService, err = mitm.NewService(mitm.ServiceConfig{
+			ListenAddr: runtimeCfg.HTTPS.Listen,
+		}, mitm.ServiceDependencies{
+			Handler: httpsProxy,
+		})
+		if err != nil {
+			return runtime.Service{}, nil, fmt.Errorf("build https service: %w", err)
+		}
 	}
 
 	dnsHandler := builders.newDNSProxy(dnsProxyConfig{
@@ -298,13 +303,16 @@ func (b componentBuilders) withDefaults(logger *slog.Logger) componentBuilders {
 			if err != nil {
 				return nil, fmt.Errorf("parse dns listen port: %w", err)
 			}
-			_, httpsPortStr, err := net.SplitHostPort(cfg.HTTPS.Listen)
-			if err != nil {
-				return nil, fmt.Errorf("parse https listen address: %w", err)
-			}
-			httpsPort, err := strconv.Atoi(httpsPortStr)
-			if err != nil {
-				return nil, fmt.Errorf("parse https listen port: %w", err)
+			httpsPort := 0
+			if len(cfg.HTTPS.Ports) != 0 {
+				_, httpsPortStr, err := net.SplitHostPort(cfg.HTTPS.Listen)
+				if err != nil {
+					return nil, fmt.Errorf("parse https listen address: %w", err)
+				}
+				httpsPort, err = strconv.Atoi(httpsPortStr)
+				if err != nil {
+					return nil, fmt.Errorf("parse https listen port: %w", err)
+				}
 			}
 			return redirect.NewManager(redirect.Config{
 				DNSListenPort:   dnsPort,
@@ -341,6 +349,20 @@ func (b componentBuilders) withDefaults(logger *slog.Logger) componentBuilders {
 		}
 	}
 	return b
+}
+
+func trustPortsForConfig(cfg config.Config) []uint16 {
+	if cfg.HTTPS.Configured() {
+		return httpsTrustedPorts(cfg.HTTPS.Ports)
+	}
+	return append([]uint16(nil), defaultTLSTrustPorts...)
+}
+
+func mitmTrustRulesForConfig(cfg config.Config) []policy.MITMHostPortRule {
+	if !cfg.HTTPS.Configured() {
+		return nil
+	}
+	return mitmTrustRules(cfg.HTTPS.MITM.Rules)
 }
 
 func mitmTrustRules(rules []config.HTTPSMITMRule) []policy.MITMHostPortRule {

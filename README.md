@@ -23,7 +23,7 @@ The daemon does not use shell-out `iptables`/`tc` orchestration for normal start
 
 ## Configuration
 
-`config.yaml` uses explicit `host:port` listener addresses, selector-based interface and DNS upstream config, glob-based hostname policy, HTTPS interception policy, and optional outbound ICMP policy:
+`config.yaml` uses explicit `host:port` listener addresses, selector-based interface and DNS upstream config, glob-based hostname policy, optional HTTPS interception policy, and optional outbound ICMP policy:
 
 ```yaml
 mode: enforce
@@ -106,6 +106,10 @@ icmp:
       - type: 3
         code: 4
 ```
+
+The entire `https:` block is optional. When omitted, NIE disables HTTPS
+redirect/MITM interception entirely but still applies DNS-based hostname policy
+to standard TLS destinations on ports `443` and `8443`.
 
 Selector modes:
 
@@ -197,11 +201,19 @@ Glob semantics:
 
 Run `nie` as root for now. Native nftables and tc/BPF lifecycle operations require elevated privileges, and the integration smoke test is root-gated. A future packaging pass can narrow this to the exact capability set.
 
+Start the daemon with an explicit `run` subcommand:
+
+```bash
+sudo ./nie run --config ./config.yaml
+```
+
 ## Commands
 
 - `make generate`: regenerate eBPF bindings with `go generate ./internal/ebpf`
 - `make test`: run the unit test suite with `go test ./...`
 - `make build`: build the daemon with `go build ./cmd/nie`
+- `go run ./cmd/nie --help`: show CLI help
+- `sudo go run ./cmd/nie run --config ./config.yaml`: start the daemon with a config file
 - `make test-integration`: run the root-gated smoke test with `sudo -E go test -tags=integration ./test/...`
 - `make vm-test`: boot or reprovision the Vagrant VM and run the mounted repo validation flow inside the guest
 

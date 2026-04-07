@@ -71,14 +71,11 @@ func NewManager(cfg Config, deps Dependencies) (*Manager, error) {
 	if cfg.DNSListenPort <= 0 || cfg.DNSListenPort > 65535 {
 		return nil, fmt.Errorf("invalid dns listen port %d", cfg.DNSListenPort)
 	}
-	if cfg.HTTPSListenPort <= 0 || cfg.HTTPSListenPort > 65535 {
-		return nil, fmt.Errorf("invalid https listen port %d", cfg.HTTPSListenPort)
-	}
 	if cfg.Mark == 0 {
 		return nil, errors.New("invalid bypass mark 0")
 	}
-	if len(cfg.HTTPSPorts) == 0 {
-		return nil, errors.New("https ports must not be empty")
+	if len(cfg.HTTPSPorts) != 0 && (cfg.HTTPSListenPort <= 0 || cfg.HTTPSListenPort > 65535) {
+		return nil, fmt.Errorf("invalid https listen port %d", cfg.HTTPSListenPort)
 	}
 
 	detector := deps.Detector

@@ -342,8 +342,8 @@ https:
 `)
 }
 
-func TestLoadConfig_RejectsMissingHTTPSBlock(t *testing.T) {
-	_, err := Load([]byte(`
+func TestLoadConfig_AllowsMissingHTTPSBlock(t *testing.T) {
+	cfg, err := Load([]byte(`
 mode: enforce
 interface:
   mode: explicit
@@ -358,11 +358,11 @@ policy:
   default: deny
   allow: ["github.com"]
 `))
-	if err == nil {
-		t.Fatal("Load() error = nil, want validation error")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "https.ports") {
-		t.Fatalf("Load() error = %v, want https.ports validation", err)
+	if cfg.HTTPS.Configured() {
+		t.Fatal("HTTPS.Configured() = true, want false when https block is omitted")
 	}
 }
 

@@ -12,17 +12,22 @@ import (
 )
 
 func TestCLIRequiresConfigFlag(t *testing.T) {
+	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
 	code := runMain(nil, cliDeps{
+		stdout: &stdout,
 		stderr: &stderr,
 	})
 
-	if code != 2 {
-		t.Fatalf("runMain() code = %d, want 2", code)
+	if code != 0 {
+		t.Fatalf("runMain() code = %d, want 0", code)
 	}
-	if !strings.Contains(stderr.String(), "missing required -config") {
-		t.Fatalf("stderr = %q, want missing required -config", stderr.String())
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty stderr", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Usage:") || !strings.Contains(stdout.String(), "run") {
+		t.Fatalf("stdout = %q, want Cobra help with run command", stdout.String())
 	}
 }
 
@@ -30,7 +35,7 @@ func TestCLIReportsConfigReadFailure(t *testing.T) {
 	var stderr bytes.Buffer
 	boom := errors.New("no such file")
 
-	code := runMain([]string{"-config", "/tmp/nie.yaml"}, cliDeps{
+	code := runMain([]string{"run", "--config", "/tmp/nie.yaml"}, cliDeps{
 		readFile: func(path string) ([]byte, error) {
 			if path != "/tmp/nie.yaml" {
 				t.Fatalf("readFile() path = %q, want /tmp/nie.yaml", path)
@@ -52,7 +57,7 @@ func TestCLIReportsConfigLoadFailure(t *testing.T) {
 	var stderr bytes.Buffer
 	boom := errors.New("invalid yaml")
 
-	code := runMain([]string{"-config", "/tmp/nie.yaml"}, cliDeps{
+	code := runMain([]string{"run", "--config", "/tmp/nie.yaml"}, cliDeps{
 		readFile: func(string) ([]byte, error) { return []byte("mode: nope"), nil },
 		loadConfig: func(raw []byte) (config.Config, error) {
 			if string(raw) != "mode: nope" {
@@ -75,7 +80,7 @@ func TestCLIReturnsAppRunError(t *testing.T) {
 	var stderr bytes.Buffer
 	boom := errors.New("start: boom")
 
-	code := runMain([]string{"-config", "/tmp/nie.yaml"}, cliDeps{
+	code := runMain([]string{"run", "--config", "/tmp/nie.yaml"}, cliDeps{
 		readFile:   func(string) ([]byte, error) { return []byte("ok"), nil },
 		loadConfig: func([]byte) (config.Config, error) { return config.Config{}, nil },
 		runApp: func(context.Context, config.Config, *slog.Logger) error {
@@ -89,5 +94,25 @@ func TestCLIReturnsAppRunError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), boom.Error()) {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), boom.Error())
+	}
+}
+
+func TestCLIRunRequiresConfigFlag(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := runMain([]string{"run"}, cliDeps{
+		stdout: &stdout,
+		stderr: &stderr,
+	})
+
+	if code != 2 {
+		t.Fatalf("runMain() code = %d, want 2", code)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty stdout", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `required flag(s) "config" not set`) {
+		t.Fatalf("stderr = %q, want required config flag error", stderr.String())
 	}
 }

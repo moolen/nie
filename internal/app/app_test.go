@@ -964,6 +964,50 @@ func TestBuildRuntimeServiceWrapsRedirectManagerError(t *testing.T) {
 	}
 }
 
+func TestBuildRuntimeServiceSkipsHTTPSLifecycleWhenHTTPSDisabled(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := testConfig(t)
+	cfg.HTTPS = config.HTTPS{}
+
+	var trustPorts []uint16
+	svc, _, err := buildRuntimeService(cfg, logger, componentBuilders{
+		newPolicy:         func([]string) (policyAllows, error) { return allowAllPolicy{}, nil },
+		validateInterface: func(string) error { return nil },
+		newEBPFManager: func(config.Config) (ebpfManagerLifecycle, error) {
+			return &fakeEBPFManager{writer: &captureTrustWriter{}}, nil
+		},
+		newRedirectManager: func(cfg config.Config) (runtime.Lifecycle, error) {
+			if cfg.HTTPS.Configured() {
+				t.Fatal("redirect manager received configured HTTPS block, want disabled HTTPS")
+			}
+			return &fakeLifecycle{}, nil
+		},
+		newDNSProxy: func(cfg dnsProxyConfig) dns.Handler {
+			ports, ok := cfg.TrustPlan.PortsForHost("example.com")
+			if !ok {
+				t.Fatal("TrustPlan.PortsForHost(example.com) = _, false, want true")
+			}
+			trustPorts = append([]uint16(nil), ports...)
+			return dns.HandlerFunc(func(dns.ResponseWriter, *dns.Msg) {})
+		},
+		newDNSLifecycle: func(string, dns.Handler) runtime.Lifecycle {
+			return &fakeLifecycle{}
+		},
+		newMarkedDialer: func(uint32) (*net.Dialer, error) {
+			return &net.Dialer{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildRuntimeService() error = %v", err)
+	}
+	if svc.HTTPS != nil {
+		t.Fatalf("svc.HTTPS = %#v, want nil when HTTPS is disabled", svc.HTTPS)
+	}
+	if got, want := trustPorts, []uint16{443, 8443}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("trustPorts = %v, want %v", got, want)
+	}
+}
+
 func TestRunStopsServiceOnContextCancellation(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := testConfig(t)

@@ -51,11 +51,12 @@ type Policy struct {
 }
 
 type HTTPS struct {
-	Listen string    `yaml:"listen"`
-	Ports  []int     `yaml:"ports"`
-	SNI    HTTPSSNI  `yaml:"sni"`
-	CA     HTTPSCA   `yaml:"ca"`
-	MITM   HTTPSMITM `yaml:"mitm"`
+	configured bool      `yaml:"-"`
+	Listen     string    `yaml:"listen"`
+	Ports      []int     `yaml:"ports"`
+	SNI        HTTPSSNI  `yaml:"sni"`
+	CA         HTTPSCA   `yaml:"ca"`
+	MITM       HTTPSMITM `yaml:"mitm"`
 }
 
 type HTTPSSNI struct {
@@ -78,6 +79,36 @@ type HTTPSMITMRule struct {
 	Methods []string `yaml:"methods"`
 	Paths   []string `yaml:"paths"`
 	Action  string   `yaml:"action"`
+}
+
+func (h *HTTPS) UnmarshalYAML(value *yaml.Node) error {
+	type rawHTTPS HTTPS
+	if value.Tag == "!!null" {
+		*h = HTTPS{}
+		return nil
+	}
+
+	var raw rawHTTPS
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+
+	*h = HTTPS(raw)
+	h.configured = true
+	return nil
+}
+
+func (h HTTPS) Configured() bool {
+	if h.configured {
+		return true
+	}
+	return h.Listen != "" ||
+		len(h.Ports) != 0 ||
+		h.SNI.Missing != "" ||
+		h.CA.CertFile != "" ||
+		h.CA.KeyFile != "" ||
+		h.MITM.Default != "" ||
+		len(h.MITM.Rules) != 0
 }
 
 type Trust struct {
@@ -157,20 +188,21 @@ func (c *Config) Validate() error {
 	c.HTTPS.CA.KeyFile = strings.TrimSpace(c.HTTPS.CA.KeyFile)
 	c.HTTPS.MITM.Default = strings.TrimSpace(c.HTTPS.MITM.Default)
 	c.DNS.Upstreams.Mode = strings.TrimSpace(c.DNS.Upstreams.Mode)
+	httpsConfigured := c.HTTPS.Configured()
 
-	if c.HTTPS.Listen == "" {
+	if httpsConfigured && c.HTTPS.Listen == "" {
 		c.HTTPS.Listen = "127.0.0.1:9443"
 	}
-	if c.HTTPS.SNI.Missing == "" {
+	if httpsConfigured && c.HTTPS.SNI.Missing == "" {
 		c.HTTPS.SNI.Missing = "deny"
 	}
-	if c.HTTPS.CA.CertFile == "" {
+	if httpsConfigured && c.HTTPS.CA.CertFile == "" {
 		c.HTTPS.CA.CertFile = "/var/lib/nie/ca/root.crt"
 	}
-	if c.HTTPS.CA.KeyFile == "" {
+	if httpsConfigured && c.HTTPS.CA.KeyFile == "" {
 		c.HTTPS.CA.KeyFile = "/var/lib/nie/ca/root.key"
 	}
-	if c.HTTPS.MITM.Default == "" {
+	if httpsConfigured && c.HTTPS.MITM.Default == "" {
 		c.HTTPS.MITM.Default = "deny"
 	}
 
@@ -240,69 +272,71 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid policy.default %q", c.Policy.Default)
 	}
 
-	if err := validateHostPort("https.listen", c.HTTPS.Listen); err != nil {
-		return err
-	}
-	if len(c.HTTPS.Ports) == 0 {
-		return errors.New("https.ports must contain at least one port")
-	}
-	seenHTTPSPorts := make(map[int]struct{}, len(c.HTTPS.Ports))
-	for i, port := range c.HTTPS.Ports {
-		if port < 1 || port > 65535 {
-			return fmt.Errorf("https.ports[%d] has out-of-range port %d (must be 1-65535)", i, port)
+	if httpsConfigured {
+		if err := validateHostPort("https.listen", c.HTTPS.Listen); err != nil {
+			return err
 		}
-		if _, exists := seenHTTPSPorts[port]; exists {
-			return fmt.Errorf("https.ports[%d] duplicates port %d", i, port)
+		if len(c.HTTPS.Ports) == 0 {
+			return errors.New("https.ports must contain at least one port")
 		}
-		seenHTTPSPorts[port] = struct{}{}
-	}
-	switch c.HTTPS.SNI.Missing {
-	case "deny", "audit":
-	default:
-		return fmt.Errorf("invalid https.sni.missing %q", c.HTTPS.SNI.Missing)
-	}
-	switch c.HTTPS.MITM.Default {
-	case "deny", "audit":
-	default:
-		return fmt.Errorf("invalid https.mitm.default %q", c.HTTPS.MITM.Default)
-	}
-	for i := range c.HTTPS.MITM.Rules {
-		rule := &c.HTTPS.MITM.Rules[i]
-		rule.Host = strings.TrimSpace(rule.Host)
-		rule.Action = strings.TrimSpace(rule.Action)
-		if rule.Host == "" {
-			return fmt.Errorf("https.mitm.rules[%d].host must not be empty", i)
-		}
-		if rule.Port < 1 {
-			return fmt.Errorf("https.mitm.rules[%d].port must be a positive non-zero value", i)
-		}
-		if rule.Port > 65535 {
-			return fmt.Errorf("https.mitm.rules[%d].port has out-of-range port %d (must be 1-65535)", i, rule.Port)
-		}
-		if len(rule.Methods) == 0 {
-			return fmt.Errorf("https.mitm.rules[%d].methods must contain at least one method", i)
-		}
-		for j, method := range rule.Methods {
-			method = strings.TrimSpace(method)
-			if method == "" {
-				return fmt.Errorf("https.mitm.rules[%d].methods[%d] must not be empty", i, j)
+		seenHTTPSPorts := make(map[int]struct{}, len(c.HTTPS.Ports))
+		for i, port := range c.HTTPS.Ports {
+			if port < 1 || port > 65535 {
+				return fmt.Errorf("https.ports[%d] has out-of-range port %d (must be 1-65535)", i, port)
 			}
-			rule.Methods[j] = method
-		}
-		if len(rule.Paths) == 0 {
-			return fmt.Errorf("https.mitm.rules[%d].paths must contain at least one path", i)
-		}
-		for j, path := range rule.Paths {
-			path = strings.TrimSpace(path)
-			if path == "" {
-				return fmt.Errorf("https.mitm.rules[%d].paths[%d] must not be empty", i, j)
+			if _, exists := seenHTTPSPorts[port]; exists {
+				return fmt.Errorf("https.ports[%d] duplicates port %d", i, port)
 			}
-			rule.Paths[j] = path
+			seenHTTPSPorts[port] = struct{}{}
 		}
-		switch rule.Action {
-		case "allow", "deny", "audit":
+		switch c.HTTPS.SNI.Missing {
+		case "deny", "audit":
 		default:
-			return fmt.Errorf("invalid https.mitm.rules[%d].action %q", i, rule.Action)
+			return fmt.Errorf("invalid https.sni.missing %q", c.HTTPS.SNI.Missing)
+		}
+		switch c.HTTPS.MITM.Default {
+		case "deny", "audit":
+		default:
+			return fmt.Errorf("invalid https.mitm.default %q", c.HTTPS.MITM.Default)
+		}
+		for i := range c.HTTPS.MITM.Rules {
+			rule := &c.HTTPS.MITM.Rules[i]
+			rule.Host = strings.TrimSpace(rule.Host)
+			rule.Action = strings.TrimSpace(rule.Action)
+			if rule.Host == "" {
+				return fmt.Errorf("https.mitm.rules[%d].host must not be empty", i)
+			}
+			if rule.Port < 1 {
+				return fmt.Errorf("https.mitm.rules[%d].port must be a positive non-zero value", i)
+			}
+			if rule.Port > 65535 {
+				return fmt.Errorf("https.mitm.rules[%d].port has out-of-range port %d (must be 1-65535)", i, rule.Port)
+			}
+			if len(rule.Methods) == 0 {
+				return fmt.Errorf("https.mitm.rules[%d].methods must contain at least one method", i)
+			}
+			for j, method := range rule.Methods {
+				method = strings.TrimSpace(method)
+				if method == "" {
+					return fmt.Errorf("https.mitm.rules[%d].methods[%d] must not be empty", i, j)
+				}
+				rule.Methods[j] = method
+			}
+			if len(rule.Paths) == 0 {
+				return fmt.Errorf("https.mitm.rules[%d].paths must contain at least one path", i)
+			}
+			for j, path := range rule.Paths {
+				path = strings.TrimSpace(path)
+				if path == "" {
+					return fmt.Errorf("https.mitm.rules[%d].paths[%d] must not be empty", i, j)
+				}
+				rule.Paths[j] = path
+			}
+			switch rule.Action {
+			case "allow", "deny", "audit":
+			default:
+				return fmt.Errorf("invalid https.mitm.rules[%d].action %q", i, rule.Action)
+			}
 		}
 	}
 	if c.Trust.MaxStaleHold < 0 {

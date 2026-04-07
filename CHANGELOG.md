@@ -1,3 +1,10 @@
+# [1.5.0](https://github.com/moolen/nie/compare/v1.4.3...v1.5.0) (2026-04-07)
+
+
+### Features
+
+* add cidr allow policy ([81fa64d](https://github.com/moolen/nie/commit/81fa64d77acb5c06100f3b89968d06f6257c29db))
+
 ## [1.4.3](https://github.com/moolen/nie/compare/v1.4.2...v1.4.3) (2026-04-07)
 
 

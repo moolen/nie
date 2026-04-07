@@ -1,3 +1,10 @@
+## [1.4.1](https://github.com/moolen/nie/compare/v1.4.0...v1.4.1) (2026-04-07)
+
+
+### Bug Fixes
+
+* detect IPv4 default routes encoded as 0.0.0.0/0 ([4b92d0c](https://github.com/moolen/nie/commit/4b92d0cc6c6b156cceb24726cd91cce5fc45ee77))
+
 # [1.4.0](https://github.com/moolen/nie/compare/v1.3.1...v1.4.0) (2026-04-07)
 
 

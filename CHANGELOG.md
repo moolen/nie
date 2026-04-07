@@ -1,3 +1,10 @@
+## [1.4.2](https://github.com/moolen/nie/compare/v1.4.1...v1.4.2) (2026-04-07)
+
+
+### Bug Fixes
+
+* ignore link-local ipv6 on startup ([fde5b2f](https://github.com/moolen/nie/commit/fde5b2ffb13ad54fd480ef6266a84df21b5e3e4e))
+
 ## [1.4.1](https://github.com/moolen/nie/compare/v1.4.0...v1.4.1) (2026-04-07)
 
 

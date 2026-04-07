@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/moolen/nie/compare/v1.2.3...v1.3.0) (2026-04-07)
+
+
+### Features
+
+* add auto network discovery ([f31b574](https://github.com/moolen/nie/commit/f31b574c6d96c8ed502a55d9e2fcacf265f9ce33))
+
 ## [1.2.3](https://github.com/moolen/nie/compare/v1.2.2...v1.2.3) (2026-04-06)
 
 

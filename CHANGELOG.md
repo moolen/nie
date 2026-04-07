@@ -1,3 +1,10 @@
+## [1.4.3](https://github.com/moolen/nie/compare/v1.4.2...v1.4.3) (2026-04-07)
+
+
+### Bug Fixes
+
+* update integration harness for cobra cli ([2b4891b](https://github.com/moolen/nie/commit/2b4891b0beae0b70fb572018effb205d8599238e))
+
 ## [1.4.2](https://github.com/moolen/nie/compare/v1.4.1...v1.4.2) (2026-04-07)
 
 

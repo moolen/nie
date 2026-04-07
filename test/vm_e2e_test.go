@@ -305,7 +305,7 @@ func (h *vmNieHarness) start(t *testing.T) *vmRun {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	cmd := exec.CommandContext(ctx, h.binPath, "-config", h.configPath)
+	cmd := exec.CommandContext(ctx, h.binPath, nieRunArgs(h.configPath)...)
 	cmd.Dir = h.root
 
 	var logs lockedBuffer

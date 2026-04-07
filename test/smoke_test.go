@@ -70,7 +70,7 @@ func TestSmoke_AuditModeAllowsUnknownTrafficButEmitsWouldDeny(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath, "-config", configPath)
+	cmd := exec.CommandContext(ctx, binPath, nieRunArgs(configPath)...)
 	cmd.Dir = root
 
 	var logs lockedBuffer
@@ -192,7 +192,7 @@ func TestSmoke_EnforceBlocksUnknownTrafficUntilDNSLearning(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath, "-config", configPath)
+	cmd := exec.CommandContext(ctx, binPath, nieRunArgs(configPath)...)
 	cmd.Dir = root
 
 	var logs lockedBuffer
@@ -309,7 +309,7 @@ func TestSmoke_EnforceKeepsActiveTCPFlowAcrossDNSRotationAndEventuallyPrunesStal
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath, "-config", configPath)
+	cmd := exec.CommandContext(ctx, binPath, nieRunArgs(configPath)...)
 	cmd.Dir = root
 
 	var logs lockedBuffer
@@ -428,7 +428,7 @@ func TestSmoke_AuditCapturesPinnedDockerBuildDomains(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath, "-config", configPath)
+	cmd := exec.CommandContext(ctx, binPath, nieRunArgs(configPath)...)
 	cmd.Dir = root
 
 	var logs lockedBuffer
@@ -534,7 +534,7 @@ func TestSmoke_AuditCapturesPinnedDockerBuildDomainsWithoutHTTPSInterception(t *
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binPath, "-config", configPath)
+	cmd := exec.CommandContext(ctx, binPath, nieRunArgs(configPath)...)
 	cmd.Dir = root
 
 	var logs lockedBuffer

@@ -9,7 +9,7 @@
 - IPv4 only in v1
 - classic DNS over UDP/TCP port 53 only
 - learns A records only; AAAA answers are ignored
-- refuses to start if the protected interface has IPv6 addresses assigned
+- refuses to start if the protected interface has non-link-local IPv6 addresses assigned
 
 ## Current Status
 
@@ -181,7 +181,7 @@ Glob semantics:
 
 - before runtime construction, `nie` resolves `interface.mode` and `dns.upstreams.mode` into concrete runtime values and fails closed on ambiguous or unusable auto-detection.
 - eBPF startup ensures `/sys/fs/bpf` exists and mounts `bpffs` when needed, then prepares `/sys/fs/bpf/nie`, loads objects, configures mode/mark, pins maps, and attaches tc egress on the resolved interface.
-- after resolution, `nie` validates that the protected interface is IPv4-only and fails closed if IPv6 addresses are assigned.
+- after resolution, `nie` validates that the protected interface does not carry non-link-local IPv6 addresses and fails closed when routable IPv6 is assigned.
 - Redirect startup detects nftables availability and installs only `nie`-owned DNS redirect rules.
 - On shutdown, `nie` stops DNS first, then removes redirect rules/chains/tables it owns, detaches tc egress, closes objects, removes pinned state under `/sys/fs/bpf/nie`, and removes clsact when it created it.
 - If conflicting preexisting `nie` redirect objects are present, startup/shutdown surfaces explicit errors instead of mutating unknown state.

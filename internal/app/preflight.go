@@ -24,7 +24,7 @@ func validateProtectedInterfaceAddrs(iface string, addrs []net.Addr) error {
 		if err != nil {
 			return fmt.Errorf("parse address %q on interface %q: %w", addr.String(), iface, err)
 		}
-		if ip == nil || ip.IsUnspecified() || ip.To4() != nil {
+		if ip == nil || ip.IsUnspecified() || ip.To4() != nil || ip.IsLinkLocalUnicast() {
 			continue
 		}
 		return fmt.Errorf("interface %s has IPv6 addresses assigned (%s); nie is IPv4-only and refuses to start", iface, addr.String())

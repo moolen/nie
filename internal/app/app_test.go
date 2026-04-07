@@ -46,6 +46,16 @@ func TestValidateProtectedInterfaceAllowsIPv4Only(t *testing.T) {
 	}
 }
 
+func TestValidateProtectedInterfaceIgnoresIPv6LinkLocal(t *testing.T) {
+	err := validateProtectedInterfaceAddrs("eth0", []net.Addr{
+		&net.IPNet{IP: net.IPv4(192, 0, 2, 10), Mask: net.CIDRMask(24, 32)},
+		&net.IPNet{IP: net.ParseIP("fe80::1234"), Mask: net.CIDRMask(64, 128)},
+	})
+	if err != nil {
+		t.Fatalf("validateProtectedInterfaceAddrs() error = %v, want nil", err)
+	}
+}
+
 func TestValidateProtectedInterfaceFailsClosedOnIPv6(t *testing.T) {
 	err := validateProtectedInterfaceAddrs("eth0", []net.Addr{
 		&net.IPNet{IP: net.ParseIP("2001:db8::10"), Mask: net.CIDRMask(64, 128)},

@@ -33,6 +33,7 @@ type policyAllows interface {
 type ebpfManagerLifecycle interface {
 	runtime.Lifecycle
 	TrustWriter() (ebpf.TrustWriter, error)
+	CIDRAllowWriter() (ebpf.CIDRAllowWriter, error)
 	EventReader() (ebpf.EventReader, error)
 }
 
@@ -68,6 +69,13 @@ type liveTrustRefresher struct {
 	source interface {
 		TrustWriter() (ebpf.TrustWriter, error)
 	}
+}
+
+type staticCIDRAllowLifecycle struct {
+	source interface {
+		CIDRAllowWriter() (ebpf.CIDRAllowWriter, error)
+	}
+	rules []ebpf.CIDRAllowRule
 }
 
 func upstreamTLSConfig(serverName string) *tls.Config {
@@ -131,6 +139,23 @@ func (r liveTrustRefresher) RefreshDestination(ctx context.Context, dst trustsyn
 	})
 }
 
+func (l staticCIDRAllowLifecycle) Start(ctx context.Context) error {
+	writer, err := l.source.CIDRAllowWriter()
+	if err != nil {
+		return fmt.Errorf("cidr allow writer: %w", err)
+	}
+	for _, rule := range l.rules {
+		if err := writer.AllowCIDR(ctx, rule); err != nil {
+			return fmt.Errorf("cidr allow %s %s: %w", rule.Prefix.String(), rule.Protocol.String(), err)
+		}
+	}
+	return nil
+}
+
+func (staticCIDRAllowLifecycle) Stop(context.Context) error {
+	return nil
+}
+
 func buildComponents(cfg config.Config, logger *slog.Logger, builders componentBuilders) (runtime.Service, error) {
 	svc, _, err := buildRuntimeService(cfg, logger, builders)
 	return svc, err
@@ -191,6 +216,17 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 		Deleter:       liveTrustDeleter{source: ebpfMgr},
 		Refresher:     liveTrustRefresher{source: ebpfMgr},
 	})
+	cidrAllowRules, err := cidrAllowRules(runtimeCfg.Policy.CIDRAllow)
+	if err != nil {
+		return runtime.Service{}, nil, fmt.Errorf("build cidr allow rules: %w", err)
+	}
+	var cidrAllowLifecycle runtime.Lifecycle
+	if len(cidrAllowRules) != 0 {
+		cidrAllowLifecycle = staticCIDRAllowLifecycle{
+			source: ebpfMgr,
+			rules:  cidrAllowRules,
+		}
+	}
 	trustReconciler := liveTrustReconciler{
 		source: ebpfMgr,
 		sync:   trustService,
@@ -270,11 +306,12 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 	dnsLC := builders.newDNSLifecycle(runtimeCfg.DNS.Listen, dnsHandler)
 
 	return runtime.Service{
-		Redirect: redirectMgr,
-		EBPF:     ebpfMgr,
-		Trust:    trustService,
-		DNS:      dnsLC,
-		HTTPS:    httpsService,
+		Redirect:  redirectMgr,
+		EBPF:      ebpfMgr,
+		CIDRAllow: cidrAllowLifecycle,
+		Trust:     trustService,
+		DNS:       dnsLC,
+		HTTPS:     httpsService,
 	}, ebpfMgr, nil
 }
 
@@ -399,4 +436,38 @@ func httpsTrustedPorts(ports []int) []uint16 {
 		out = append(out, uint16(port))
 	}
 	return out
+}
+
+func cidrAllowRules(rules []config.PolicyCIDRAllowRule) ([]ebpf.CIDRAllowRule, error) {
+	out := make([]ebpf.CIDRAllowRule, 0, len(rules))
+	for _, rule := range rules {
+		prefix, err := netip.ParsePrefix(rule.CIDR)
+		if err != nil {
+			return nil, fmt.Errorf("parse prefix %q: %w", rule.CIDR, err)
+		}
+		protocol := cidrAllowProtocol(rule.Protocol)
+		if protocol == 0 {
+			return nil, fmt.Errorf("unsupported protocol %q", rule.Protocol)
+		}
+		out = append(out, ebpf.CIDRAllowRule{
+			Prefix:   prefix.Masked(),
+			Protocol: protocol,
+		})
+	}
+	return out, nil
+}
+
+func cidrAllowProtocol(raw string) ebpf.CIDRProtocol {
+	switch raw {
+	case "tcp":
+		return ebpf.CIDRProtocolTCP
+	case "udp":
+		return ebpf.CIDRProtocolUDP
+	case "icmp":
+		return ebpf.CIDRProtocolICMP
+	case "any":
+		return ebpf.CIDRProtocolAny
+	default:
+		return 0
+	}
 }

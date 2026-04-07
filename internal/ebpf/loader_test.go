@@ -37,6 +37,21 @@ func (m *fakeMap) Delete(key allowKey) error {
 	return nil
 }
 
+type fakeCIDRMap struct {
+	entries map[cidrKey]cidrValue
+}
+
+func newFakeCIDRMap() *fakeCIDRMap {
+	return &fakeCIDRMap{
+		entries: make(map[cidrKey]cidrValue),
+	}
+}
+
+func (m *fakeCIDRMap) Put(key cidrKey, value cidrValue) error {
+	m.entries[key] = value
+	return nil
+}
+
 type allowOnlyTrustWriter struct{}
 
 func (allowOnlyTrustWriter) Allow(context.Context, TrustEntry) error { return nil }
@@ -48,8 +63,36 @@ func TestPinnedPaths(t *testing.T) {
 	if paths.AllowMap != "/sys/fs/bpf/nie/allow_map" {
 		t.Fatalf("AllowMap = %q", paths.AllowMap)
 	}
+	if paths.CIDRAllowMap != "/sys/fs/bpf/nie/cidr_allow_map" {
+		t.Fatalf("CIDRAllowMap = %q", paths.CIDRAllowMap)
+	}
 	if paths.Events != "/sys/fs/bpf/nie/events" {
 		t.Fatalf("Events = %q", paths.Events)
+	}
+}
+
+func TestAllowCIDRStoresIPv4PrefixAndProtocolMask(t *testing.T) {
+	fake := newFakeCIDRMap()
+	writer := NewCIDRAllowWriter(fake)
+
+	err := writer.AllowCIDR(context.Background(), CIDRAllowRule{
+		Prefix:   netip.MustParsePrefix("203.0.113.42/24"),
+		Protocol: CIDRProtocolUDP,
+	})
+	if err != nil {
+		t.Fatalf("AllowCIDR() error = %v", err)
+	}
+
+	wantKey := cidrKey{
+		PrefixLen: 24,
+		Addr:      [4]byte{203, 0, 113, 0},
+	}
+	gotValue, ok := fake.entries[wantKey]
+	if !ok {
+		t.Fatalf("fake.entries missing key %#v", wantKey)
+	}
+	if gotValue.ProtocolMask != uint8(CIDRProtocolUDP) {
+		t.Fatalf("ProtocolMask = %d, want %d", gotValue.ProtocolMask, uint8(CIDRProtocolUDP))
 	}
 }
 
@@ -179,6 +222,7 @@ func TestManagerStartPreparesBpffsLoadsObjectsAndAttachesTC(t *testing.T) {
 	objects := &fakeRuntimeObjects{
 		recorder:  recorder,
 		allow:     newFakeMap(),
+		cidrAllow: newFakeCIDRMap(),
 		programFD: 77,
 	}
 	loader := &fakeObjectLoader{
@@ -213,7 +257,7 @@ func TestManagerStartPreparesBpffsLoadsObjectsAndAttachesTC(t *testing.T) {
 		"loader.load",
 		"objects.setMode:1",
 		"objects.setBypassMark:42",
-		"objects.pinMaps:/sys/fs/bpf/nie/allow_map:/sys/fs/bpf/nie/events",
+		"objects.pinMaps:/sys/fs/bpf/nie/allow_map:/sys/fs/bpf/nie/cidr_allow_map:/sys/fs/bpf/nie/events",
 		"tc.ensureClsact:eth0",
 		"objects.programFD:77",
 		"tc.attachEgress:eth0:77:nie_egress",
@@ -316,9 +360,10 @@ func TestManagerEventReaderFailsBeforeStart(t *testing.T) {
 		Loader: &fakeObjectLoader{
 			recorder: &callRecorder{},
 			objects: &fakeRuntimeObjects{
-				recorder: &callRecorder{},
-				allow:    newFakeMap(),
-				events:   &cebpf.Map{},
+				recorder:  &callRecorder{},
+				allow:     newFakeMap(),
+				cidrAllow: newFakeCIDRMap(),
+				events:    &cebpf.Map{},
 			},
 		},
 		TC: &fakeTCOps{recorder: &callRecorder{}},
@@ -348,6 +393,7 @@ func TestManagerEventReaderAfterStartUsesReaderFactory(t *testing.T) {
 			objects: &fakeRuntimeObjects{
 				recorder:  recorder,
 				allow:     newFakeMap(),
+				cidrAllow: newFakeCIDRMap(),
 				events:    &cebpf.Map{},
 				programFD: 55,
 			},
@@ -424,6 +470,7 @@ func TestManagerStopDetachesAndCleansPinnedState(t *testing.T) {
 	objects := &fakeRuntimeObjects{
 		recorder:  recorder,
 		allow:     newFakeMap(),
+		cidrAllow: newFakeCIDRMap(),
 		programFD: 99,
 	}
 	manager, err := NewManager(ManagerConfig{
@@ -457,7 +504,7 @@ func TestManagerStopDetachesAndCleansPinnedState(t *testing.T) {
 		"loader.load",
 		"objects.setMode:0",
 		"objects.setBypassMark:9",
-		"objects.pinMaps:/sys/fs/bpf/nie/allow_map:/sys/fs/bpf/nie/events",
+		"objects.pinMaps:/sys/fs/bpf/nie/allow_map:/sys/fs/bpf/nie/cidr_allow_map:/sys/fs/bpf/nie/events",
 		"tc.ensureClsact:eth0",
 		"objects.programFD:99",
 		"tc.attachEgress:eth0:99:nie_egress",
@@ -493,6 +540,7 @@ func TestManagerStopLeavesPreexistingClsactInPlace(t *testing.T) {
 			objects: &fakeRuntimeObjects{
 				recorder:  recorder,
 				allow:     newFakeMap(),
+				cidrAllow: newFakeCIDRMap(),
 				programFD: 99,
 			},
 		},
@@ -523,6 +571,7 @@ func TestManagerStartCleansUpWhenAttachFails(t *testing.T) {
 	objects := &fakeRuntimeObjects{
 		recorder:  recorder,
 		allow:     newFakeMap(),
+		cidrAllow: newFakeCIDRMap(),
 		programFD: 88,
 	}
 	attachErr := errors.New("attach failed")
@@ -556,7 +605,7 @@ func TestManagerStartCleansUpWhenAttachFails(t *testing.T) {
 		"loader.load",
 		"objects.setMode:0",
 		"objects.setBypassMark:3",
-		"objects.pinMaps:/sys/fs/bpf/nie/allow_map:/sys/fs/bpf/nie/events",
+		"objects.pinMaps:/sys/fs/bpf/nie/allow_map:/sys/fs/bpf/nie/cidr_allow_map:/sys/fs/bpf/nie/events",
 		"tc.ensureClsact:eth0",
 		"objects.programFD:88",
 		"tc.attachEgress:eth0:88:nie_egress",
@@ -593,6 +642,7 @@ func TestManagerStopPropagatesDetachFailure(t *testing.T) {
 			objects: &fakeRuntimeObjects{
 				recorder:  recorder,
 				allow:     newFakeMap(),
+				cidrAllow: newFakeCIDRMap(),
 				programFD: 88,
 			},
 		},
@@ -618,7 +668,7 @@ func TestManagerStopPropagatesDetachFailure(t *testing.T) {
 		"loader.load",
 		"objects.setMode:0",
 		"objects.setBypassMark:3",
-		"objects.pinMaps:/sys/fs/bpf/nie/allow_map:/sys/fs/bpf/nie/events",
+		"objects.pinMaps:/sys/fs/bpf/nie/allow_map:/sys/fs/bpf/nie/cidr_allow_map:/sys/fs/bpf/nie/events",
 		"tc.ensureClsact:eth0",
 		"objects.programFD:88",
 		"tc.attachEgress:eth0:88:nie_egress",
@@ -681,6 +731,7 @@ func (l *fakeObjectLoader) Load() (runtimeObjects, error) {
 type fakeRuntimeObjects struct {
 	recorder   *callRecorder
 	allow      allowMap
+	cidrAllow  cidrAllowMap
 	events     *cebpf.Map
 	programFD  int
 	mode       uint32
@@ -691,6 +742,10 @@ type fakeRuntimeObjects struct {
 
 func (o *fakeRuntimeObjects) AllowMap() allowMap {
 	return o.allow
+}
+
+func (o *fakeRuntimeObjects) CIDRAllowMap() cidrAllowMap {
+	return o.cidrAllow
 }
 
 func (o *fakeRuntimeObjects) EventsMap() *cebpf.Map {
@@ -710,7 +765,7 @@ func (o *fakeRuntimeObjects) SetBypassMark(mark uint32) error {
 }
 
 func (o *fakeRuntimeObjects) PinMaps(paths Paths) error {
-	o.recorder.add("objects.pinMaps:" + paths.AllowMap + ":" + paths.Events)
+	o.recorder.add("objects.pinMaps:" + paths.AllowMap + ":" + paths.CIDRAllowMap + ":" + paths.Events)
 	o.pinned = paths
 	return nil
 }

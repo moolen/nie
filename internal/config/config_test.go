@@ -568,6 +568,121 @@ https:
 	}
 }
 
+func TestLoadConfig_CIDRAllowRules(t *testing.T) {
+	raw := []byte(`
+mode: enforce
+interface:
+  mode: explicit
+  name: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+  cidr_allow:
+    - cidr: " 10.0.0.0/24 "
+      protocol: " tcp "
+    - cidr: 192.0.2.10
+      protocol: udp
+    - cidr: 198.51.100.0/24
+      protocol: any
+https:
+  ports: [443]
+`)
+
+	cfg, err := Load(raw)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := len(cfg.Policy.CIDRAllow); got != 3 {
+		t.Fatalf("len(Policy.CIDRAllow) = %d, want 3", got)
+	}
+	if got := cfg.Policy.CIDRAllow[0].CIDR; got != "10.0.0.0/24" {
+		t.Fatalf("Policy.CIDRAllow[0].CIDR = %q, want %q", got, "10.0.0.0/24")
+	}
+	if got := cfg.Policy.CIDRAllow[0].Protocol; got != "tcp" {
+		t.Fatalf("Policy.CIDRAllow[0].Protocol = %q, want %q", got, "tcp")
+	}
+	if got := cfg.Policy.CIDRAllow[1].CIDR; got != "192.0.2.10/32" {
+		t.Fatalf("Policy.CIDRAllow[1].CIDR = %q, want %q", got, "192.0.2.10/32")
+	}
+	if got := cfg.Policy.CIDRAllow[2].Protocol; got != "any" {
+		t.Fatalf("Policy.CIDRAllow[2].Protocol = %q, want %q", got, "any")
+	}
+}
+
+func TestLoadConfig_RejectsInvalidCIDRAllowRules(t *testing.T) {
+	tests := []struct {
+		name        string
+		rules       string
+		wantContext string
+	}{
+		{
+			name: "invalid cidr",
+			rules: `
+    - cidr: not-a-cidr
+      protocol: tcp`,
+			wantContext: "policy.cidr_allow[0].cidr",
+		},
+		{
+			name: "ipv6 cidr",
+			rules: `
+    - cidr: 2001:db8::/64
+      protocol: tcp`,
+			wantContext: "policy.cidr_allow[0].cidr",
+		},
+		{
+			name: "invalid protocol",
+			rules: `
+    - cidr: 10.0.0.0/24
+      protocol: sctp`,
+			wantContext: "policy.cidr_allow[0].protocol",
+		},
+		{
+			name: "duplicate normalized rules",
+			rules: `
+    - cidr: 192.0.2.10
+      protocol: tcp
+    - cidr: 192.0.2.10/32
+      protocol: tcp`,
+			wantContext: "policy.cidr_allow[1]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load([]byte(`
+mode: enforce
+interface:
+  mode: explicit
+  name: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+  cidr_allow:` + tt.rules + `
+https:
+  ports: [443]
+`))
+			if err == nil {
+				t.Fatal("Load() error = nil, want validation error")
+			}
+			if !strings.Contains(err.Error(), tt.wantContext) {
+				t.Fatalf("Load() error = %v, want %q context", err, tt.wantContext)
+			}
+		})
+	}
+}
+
 func TestLoadConfig_RejectsEmptyOrWhitespaceUpstreamEntries(t *testing.T) {
 	tests := []struct {
 		name      string

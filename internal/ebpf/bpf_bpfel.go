@@ -25,6 +25,18 @@ type bpfAllowValue struct {
 	ExpiresAtMonoNs uint64
 }
 
+type bpfCidrKey struct {
+	_         structs.HostLayout
+	Prefixlen uint32
+	Addr      [4]uint8
+}
+
+type bpfCidrValue struct {
+	_            structs.HostLayout
+	ProtocolMask uint8
+	Pad          [3]uint8
+}
+
 // loadBpf returns the embedded CollectionSpec for bpf.
 func loadBpf() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_BpfBytes)
@@ -74,8 +86,9 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	AllowMap *ebpf.MapSpec `ebpf:"allow_map"`
-	Events   *ebpf.MapSpec `ebpf:"events"`
+	AllowMap     *ebpf.MapSpec `ebpf:"allow_map"`
+	CidrAllowMap *ebpf.MapSpec `ebpf:"cidr_allow_map"`
+	Events       *ebpf.MapSpec `ebpf:"events"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -106,13 +119,15 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	AllowMap *ebpf.Map `ebpf:"allow_map"`
-	Events   *ebpf.Map `ebpf:"events"`
+	AllowMap     *ebpf.Map `ebpf:"allow_map"`
+	CidrAllowMap *ebpf.Map `ebpf:"cidr_allow_map"`
+	Events       *ebpf.Map `ebpf:"events"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.AllowMap,
+		m.CidrAllowMap,
 		m.Events,
 	)
 }

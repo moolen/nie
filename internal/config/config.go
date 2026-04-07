@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -46,8 +47,14 @@ type UpstreamSelector struct {
 }
 
 type Policy struct {
-	Default string   `yaml:"default"`
-	Allow   []string `yaml:"allow"`
+	Default   string                `yaml:"default"`
+	Allow     []string              `yaml:"allow"`
+	CIDRAllow []PolicyCIDRAllowRule `yaml:"cidr_allow"`
+}
+
+type PolicyCIDRAllowRule struct {
+	CIDR     string `yaml:"cidr"`
+	Protocol string `yaml:"protocol"`
 }
 
 type HTTPS struct {
@@ -217,6 +224,36 @@ func (c *Config) Validate() error {
 			c.Policy.Allow[i] = trimmed
 		}
 	}
+	if c.Policy.CIDRAllow == nil {
+		c.Policy.CIDRAllow = []PolicyCIDRAllowRule{}
+	} else {
+		seenCIDRAllow := make(map[string]struct{}, len(c.Policy.CIDRAllow))
+		for i := range c.Policy.CIDRAllow {
+			rule := &c.Policy.CIDRAllow[i]
+			rule.CIDR = strings.TrimSpace(rule.CIDR)
+			rule.Protocol = strings.ToLower(strings.TrimSpace(rule.Protocol))
+			if rule.CIDR == "" {
+				return fmt.Errorf("policy.cidr_allow[%d].cidr must not be empty", i)
+			}
+			normalizedCIDR, err := normalizeIPv4CIDR(rule.CIDR)
+			if err != nil {
+				return fmt.Errorf("policy.cidr_allow[%d].cidr %w", i, err)
+			}
+			rule.CIDR = normalizedCIDR
+			switch rule.Protocol {
+			case "tcp", "udp", "icmp", "any":
+			case "":
+				return fmt.Errorf("policy.cidr_allow[%d].protocol must not be empty", i)
+			default:
+				return fmt.Errorf("policy.cidr_allow[%d].protocol %q must be one of tcp, udp, icmp, any", i, rule.Protocol)
+			}
+			key := rule.CIDR + "|" + rule.Protocol
+			if _, exists := seenCIDRAllow[key]; exists {
+				return fmt.Errorf("policy.cidr_allow[%d] duplicates cidr/protocol rule %q", i, key)
+			}
+			seenCIDRAllow[key] = struct{}{}
+		}
+	}
 
 	for i, upstream := range c.DNS.Upstreams.Addresses {
 		c.DNS.Upstreams.Addresses[i] = strings.TrimSpace(upstream)
@@ -382,4 +419,22 @@ func parseDurationNode(node *yaml.Node, field string) (time.Duration, error) {
 	}
 
 	return duration, nil
+}
+
+func normalizeIPv4CIDR(raw string) (string, error) {
+	if addr, err := netip.ParseAddr(raw); err == nil {
+		if !addr.Is4() {
+			return "", fmt.Errorf("value %q must be an IPv4 CIDR or IPv4 address", raw)
+		}
+		return netip.PrefixFrom(addr, 32).Masked().String(), nil
+	}
+
+	prefix, err := netip.ParsePrefix(raw)
+	if err != nil {
+		return "", fmt.Errorf("value %q must be an IPv4 CIDR or IPv4 address", raw)
+	}
+	if !prefix.Addr().Is4() {
+		return "", fmt.Errorf("value %q must be an IPv4 CIDR or IPv4 address", raw)
+	}
+	return prefix.Masked().String(), nil
 }

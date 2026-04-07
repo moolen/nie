@@ -32,17 +32,18 @@ func (f *fakeLifecycleImpl) Stop(context.Context) error {
 func TestServiceStartOrdersDependencies(t *testing.T) {
 	var calls []string
 	svc := Service{
-		Redirect: fakeLifecycle("redirect", &calls),
-		EBPF:     fakeLifecycle("ebpf", &calls),
-		Trust:    fakeLifecycle("trust", &calls),
-		DNS:      fakeLifecycle("dns", &calls),
-		HTTPS:    fakeLifecycle("https", &calls),
+		Redirect:  fakeLifecycle("redirect", &calls),
+		EBPF:      fakeLifecycle("ebpf", &calls),
+		CIDRAllow: fakeLifecycle("cidr", &calls),
+		Trust:     fakeLifecycle("trust", &calls),
+		DNS:       fakeLifecycle("dns", &calls),
+		HTTPS:     fakeLifecycle("https", &calls),
 	}
 
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if diff := cmp.Diff([]string{"ebpf:start", "trust:start", "dns:start", "https:start", "redirect:start"}, calls); diff != "" {
+	if diff := cmp.Diff([]string{"ebpf:start", "cidr:start", "trust:start", "dns:start", "https:start", "redirect:start"}, calls); diff != "" {
 		t.Fatalf("call order mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -50,17 +51,18 @@ func TestServiceStartOrdersDependencies(t *testing.T) {
 func TestServiceStopOrdersDependencies(t *testing.T) {
 	var calls []string
 	svc := Service{
-		Redirect: fakeLifecycle("redirect", &calls),
-		EBPF:     fakeLifecycle("ebpf", &calls),
-		Trust:    fakeLifecycle("trust", &calls),
-		DNS:      fakeLifecycle("dns", &calls),
-		HTTPS:    fakeLifecycle("https", &calls),
+		Redirect:  fakeLifecycle("redirect", &calls),
+		EBPF:      fakeLifecycle("ebpf", &calls),
+		CIDRAllow: fakeLifecycle("cidr", &calls),
+		Trust:     fakeLifecycle("trust", &calls),
+		DNS:       fakeLifecycle("dns", &calls),
+		HTTPS:     fakeLifecycle("https", &calls),
 	}
 
 	if err := svc.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}
-	if diff := cmp.Diff([]string{"redirect:stop", "https:stop", "dns:stop", "trust:stop", "ebpf:stop"}, calls); diff != "" {
+	if diff := cmp.Diff([]string{"redirect:stop", "https:stop", "dns:stop", "trust:stop", "cidr:stop", "ebpf:stop"}, calls); diff != "" {
 		t.Fatalf("call order mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -71,17 +73,18 @@ func TestServiceStopContinuesAfterError(t *testing.T) {
 	dnsLC.stopErr = errors.New("boom")
 
 	svc := Service{
-		Redirect: fakeLifecycle("redirect", &calls),
-		EBPF:     fakeLifecycle("ebpf", &calls),
-		Trust:    fakeLifecycle("trust", &calls),
-		DNS:      dnsLC,
-		HTTPS:    fakeLifecycle("https", &calls),
+		Redirect:  fakeLifecycle("redirect", &calls),
+		EBPF:      fakeLifecycle("ebpf", &calls),
+		CIDRAllow: fakeLifecycle("cidr", &calls),
+		Trust:     fakeLifecycle("trust", &calls),
+		DNS:       dnsLC,
+		HTTPS:     fakeLifecycle("https", &calls),
 	}
 
 	if err := svc.Stop(context.Background()); err == nil {
 		t.Fatalf("Stop() error = nil, want non-nil")
 	}
-	if diff := cmp.Diff([]string{"redirect:stop", "https:stop", "dns:stop", "trust:stop", "ebpf:stop"}, calls); diff != "" {
+	if diff := cmp.Diff([]string{"redirect:stop", "https:stop", "dns:stop", "trust:stop", "cidr:stop", "ebpf:stop"}, calls); diff != "" {
 		t.Fatalf("call order mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -93,11 +96,12 @@ func TestServiceStartPropagatesError(t *testing.T) {
 		ebpfLC.startErr = errors.New("boom")
 
 		svc := Service{
-			Redirect: fakeLifecycle("redirect", &calls),
-			EBPF:     ebpfLC,
-			Trust:    fakeLifecycle("trust", &calls),
-			DNS:      fakeLifecycle("dns", &calls),
-			HTTPS:    fakeLifecycle("https", &calls),
+			Redirect:  fakeLifecycle("redirect", &calls),
+			EBPF:      ebpfLC,
+			CIDRAllow: fakeLifecycle("cidr", &calls),
+			Trust:     fakeLifecycle("trust", &calls),
+			DNS:       fakeLifecycle("dns", &calls),
+			HTTPS:     fakeLifecycle("https", &calls),
 		}
 
 		if err := svc.Start(context.Background()); err == nil {
@@ -114,17 +118,40 @@ func TestServiceStartPropagatesError(t *testing.T) {
 		redirectLC.startErr = errors.New("boom")
 
 		svc := Service{
-			Redirect: redirectLC,
-			EBPF:     fakeLifecycle("ebpf", &calls),
-			Trust:    fakeLifecycle("trust", &calls),
-			DNS:      fakeLifecycle("dns", &calls),
-			HTTPS:    fakeLifecycle("https", &calls),
+			Redirect:  redirectLC,
+			EBPF:      fakeLifecycle("ebpf", &calls),
+			CIDRAllow: fakeLifecycle("cidr", &calls),
+			Trust:     fakeLifecycle("trust", &calls),
+			DNS:       fakeLifecycle("dns", &calls),
+			HTTPS:     fakeLifecycle("https", &calls),
 		}
 
 		if err := svc.Start(context.Background()); err == nil {
 			t.Fatalf("Start() error = nil, want non-nil")
 		}
-		if diff := cmp.Diff([]string{"ebpf:start", "trust:start", "dns:start", "https:start", "redirect:start", "https:stop", "dns:stop", "trust:stop", "ebpf:stop"}, calls); diff != "" {
+		if diff := cmp.Diff([]string{"ebpf:start", "cidr:start", "trust:start", "dns:start", "https:start", "redirect:start", "https:stop", "dns:stop", "trust:stop", "cidr:stop", "ebpf:stop"}, calls); diff != "" {
+			t.Fatalf("call order mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("cidr allow", func(t *testing.T) {
+		var calls []string
+		cidrLC := fakeLifecycle("cidr", &calls)
+		cidrLC.startErr = errors.New("boom")
+
+		svc := Service{
+			Redirect:  fakeLifecycle("redirect", &calls),
+			EBPF:      fakeLifecycle("ebpf", &calls),
+			CIDRAllow: cidrLC,
+			Trust:     fakeLifecycle("trust", &calls),
+			DNS:       fakeLifecycle("dns", &calls),
+			HTTPS:     fakeLifecycle("https", &calls),
+		}
+
+		if err := svc.Start(context.Background()); err == nil {
+			t.Fatalf("Start() error = nil, want non-nil")
+		}
+		if diff := cmp.Diff([]string{"ebpf:start", "cidr:start", "ebpf:stop"}, calls); diff != "" {
 			t.Fatalf("call order mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -135,17 +162,18 @@ func TestServiceStartPropagatesError(t *testing.T) {
 		trustLC.startErr = errors.New("boom")
 
 		svc := Service{
-			Redirect: fakeLifecycle("redirect", &calls),
-			EBPF:     fakeLifecycle("ebpf", &calls),
-			Trust:    trustLC,
-			DNS:      fakeLifecycle("dns", &calls),
-			HTTPS:    fakeLifecycle("https", &calls),
+			Redirect:  fakeLifecycle("redirect", &calls),
+			EBPF:      fakeLifecycle("ebpf", &calls),
+			CIDRAllow: fakeLifecycle("cidr", &calls),
+			Trust:     trustLC,
+			DNS:       fakeLifecycle("dns", &calls),
+			HTTPS:     fakeLifecycle("https", &calls),
 		}
 
 		if err := svc.Start(context.Background()); err == nil {
 			t.Fatalf("Start() error = nil, want non-nil")
 		}
-		if diff := cmp.Diff([]string{"ebpf:start", "trust:start", "ebpf:stop"}, calls); diff != "" {
+		if diff := cmp.Diff([]string{"ebpf:start", "cidr:start", "trust:start", "cidr:stop", "ebpf:stop"}, calls); diff != "" {
 			t.Fatalf("call order mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -156,17 +184,18 @@ func TestServiceStartPropagatesError(t *testing.T) {
 		dnsLC.startErr = errors.New("boom")
 
 		svc := Service{
-			Redirect: fakeLifecycle("redirect", &calls),
-			EBPF:     fakeLifecycle("ebpf", &calls),
-			Trust:    fakeLifecycle("trust", &calls),
-			DNS:      dnsLC,
-			HTTPS:    fakeLifecycle("https", &calls),
+			Redirect:  fakeLifecycle("redirect", &calls),
+			EBPF:      fakeLifecycle("ebpf", &calls),
+			CIDRAllow: fakeLifecycle("cidr", &calls),
+			Trust:     fakeLifecycle("trust", &calls),
+			DNS:       dnsLC,
+			HTTPS:     fakeLifecycle("https", &calls),
 		}
 
 		if err := svc.Start(context.Background()); err == nil {
 			t.Fatalf("Start() error = nil, want non-nil")
 		}
-		if diff := cmp.Diff([]string{"ebpf:start", "trust:start", "dns:start", "trust:stop", "ebpf:stop"}, calls); diff != "" {
+		if diff := cmp.Diff([]string{"ebpf:start", "cidr:start", "trust:start", "dns:start", "trust:stop", "cidr:stop", "ebpf:stop"}, calls); diff != "" {
 			t.Fatalf("call order mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -177,17 +206,18 @@ func TestServiceStartPropagatesError(t *testing.T) {
 		httpsLC.startErr = errors.New("boom")
 
 		svc := Service{
-			Redirect: fakeLifecycle("redirect", &calls),
-			EBPF:     fakeLifecycle("ebpf", &calls),
-			Trust:    fakeLifecycle("trust", &calls),
-			DNS:      fakeLifecycle("dns", &calls),
-			HTTPS:    httpsLC,
+			Redirect:  fakeLifecycle("redirect", &calls),
+			EBPF:      fakeLifecycle("ebpf", &calls),
+			CIDRAllow: fakeLifecycle("cidr", &calls),
+			Trust:     fakeLifecycle("trust", &calls),
+			DNS:       fakeLifecycle("dns", &calls),
+			HTTPS:     httpsLC,
 		}
 
 		if err := svc.Start(context.Background()); err == nil {
 			t.Fatalf("Start() error = nil, want non-nil")
 		}
-		if diff := cmp.Diff([]string{"ebpf:start", "trust:start", "dns:start", "https:start", "dns:stop", "trust:stop", "ebpf:stop"}, calls); diff != "" {
+		if diff := cmp.Diff([]string{"ebpf:start", "cidr:start", "trust:start", "dns:start", "https:start", "dns:stop", "trust:stop", "cidr:stop", "ebpf:stop"}, calls); diff != "" {
 			t.Fatalf("call order mismatch (-want +got):\n%s", diff)
 		}
 	})

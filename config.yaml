@@ -14,6 +14,11 @@ policy:
   allow:
     - "*.github.com"
     - github.com
+  cidr_allow:
+    - cidr: 192.0.2.10
+      protocol: tcp
+    - cidr: 198.51.100.0/24
+      protocol: udp
 https:
   ports:
     - 443

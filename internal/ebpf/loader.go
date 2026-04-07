@@ -65,19 +65,22 @@ type Manager struct {
 	started bool
 	objects runtimeObjects
 	writer  TrustWriter
+	cidr    CIDRAllowWriter
 
 	createdClsact bool
 }
 
 type Paths struct {
-	AllowMap string
-	Events   string
+	AllowMap     string
+	CIDRAllowMap string
+	Events       string
 }
 
 func PinnedPaths(root string) Paths {
 	return Paths{
-		AllowMap: filepath.Join(root, "allow_map"),
-		Events:   filepath.Join(root, "events"),
+		AllowMap:     filepath.Join(root, "allow_map"),
+		CIDRAllowMap: filepath.Join(root, "cidr_allow_map"),
+		Events:       filepath.Join(root, "events"),
 	}
 }
 
@@ -160,6 +163,7 @@ func (m *Manager) Start(_ context.Context) error {
 
 	m.objects = objects
 	m.writer = NewTrustWriter(objects.AllowMap(), m.now)
+	m.cidr = NewCIDRAllowWriter(objects.CIDRAllowMap())
 	m.createdClsact = createdClsact
 	m.started = true
 	return nil
@@ -196,6 +200,7 @@ func (m *Manager) Stop(_ context.Context) error {
 
 	m.objects = nil
 	m.writer = nil
+	m.cidr = nil
 	m.started = false
 	m.createdClsact = false
 	return firstErr
@@ -206,6 +211,13 @@ func (m *Manager) TrustWriter() (TrustWriter, error) {
 		return nil, ErrManagerNotStarted
 	}
 	return m.writer, nil
+}
+
+func (m *Manager) CIDRAllowWriter() (CIDRAllowWriter, error) {
+	if !m.started || m.cidr == nil {
+		return nil, ErrManagerNotStarted
+	}
+	return m.cidr, nil
 }
 
 func (m *Manager) EventReader() (EventReader, error) {
@@ -277,8 +289,27 @@ type allowMap interface {
 	Delete(key allowKey) error
 }
 
+// cidrKey/cidrValue mirror bpf/include/common.h structs:
+//
+//	struct cidr_key { __u32 prefixlen; __u8 addr[4]; };
+//	struct cidr_value { __u8 protocol_mask; __u8 pad[3]; };
+type cidrKey struct {
+	PrefixLen uint32
+	Addr      [4]byte
+}
+
+type cidrValue struct {
+	ProtocolMask uint8
+	Pad          [3]byte
+}
+
+type cidrAllowMap interface {
+	Put(key cidrKey, value cidrValue) error
+}
+
 type runtimeObjects interface {
 	AllowMap() allowMap
+	CIDRAllowMap() cidrAllowMap
 	EventsMap() *cebpf.Map
 	SetMode(mode uint32) error
 	SetBypassMark(mark uint32) error
@@ -354,6 +385,10 @@ func (o *liveRuntimeObjects) AllowMap() allowMap {
 	return liveAllowMap{m: o.objs.AllowMap}
 }
 
+func (o *liveRuntimeObjects) CIDRAllowMap() cidrAllowMap {
+	return liveCIDRAllowMap{m: o.objs.CidrAllowMap}
+}
+
 func (o *liveRuntimeObjects) EventsMap() *cebpf.Map {
 	return o.objs.Events
 }
@@ -383,10 +418,13 @@ func (o *liveRuntimeObjects) SetBypassMark(mark uint32) error {
 }
 
 func (o *liveRuntimeObjects) PinMaps(paths Paths) error {
-	if o.objs.AllowMap == nil || o.objs.Events == nil {
+	if o.objs.AllowMap == nil || o.objs.CidrAllowMap == nil || o.objs.Events == nil {
 		return errors.New("bpf maps are not loaded")
 	}
 	if err := o.objs.AllowMap.Pin(paths.AllowMap); err != nil {
+		return err
+	}
+	if err := o.objs.CidrAllowMap.Pin(paths.CIDRAllowMap); err != nil {
 		return err
 	}
 	if err := o.objs.Events.Pin(paths.Events); err != nil {
@@ -424,6 +462,17 @@ func (m liveAllowMap) Delete(key allowKey) error {
 	return m.m.Delete(key)
 }
 
+type liveCIDRAllowMap struct {
+	m *cebpf.Map
+}
+
+func (m liveCIDRAllowMap) Put(key cidrKey, value cidrValue) error {
+	if m.m == nil {
+		return errors.New("cidr allow map is not loaded")
+	}
+	return m.m.Put(key, value)
+}
+
 type liveEventReader struct {
 	reader *ringbuf.Reader
 }
@@ -458,8 +507,8 @@ func decodeEgressEvent(raw []byte) (EgressEvent, error) {
 			byte(dst >> 8),
 			byte(dst),
 		}),
-		Reason: EgressReason(reason),
-		Action: EgressAction(action),
+		Reason:   EgressReason(reason),
+		Action:   EgressAction(action),
 		Protocol: EgressProtocol(protocol),
 		Port:     dport,
 	}, nil
@@ -657,4 +706,33 @@ func (w *trustWriter) Delete(_ context.Context, ipv4 netip.Addr, port uint16) er
 		return fmt.Errorf("invalid IPv4: %q", ipv4.String())
 	}
 	return w.m.Delete(allowKey{Addr: ipv4.As4(), Dport: port})
+}
+
+type cidrAllowWriter struct {
+	m cidrAllowMap
+}
+
+func NewCIDRAllowWriter(m cidrAllowMap) CIDRAllowWriter {
+	return &cidrAllowWriter{m: m}
+}
+
+func (w *cidrAllowWriter) AllowCIDR(_ context.Context, rule CIDRAllowRule) error {
+	if !rule.Prefix.IsValid() {
+		return errors.New("invalid prefix")
+	}
+	prefix := rule.Prefix.Masked()
+	if !prefix.Addr().Is4() {
+		return fmt.Errorf("invalid IPv4 prefix: %q", prefix.String())
+	}
+	switch rule.Protocol {
+	case CIDRProtocolTCP, CIDRProtocolUDP, CIDRProtocolICMP, CIDRProtocolAny:
+	default:
+		return fmt.Errorf("invalid cidr protocol %q", rule.Protocol.String())
+	}
+	return w.m.Put(cidrKey{
+		PrefixLen: uint32(prefix.Bits()),
+		Addr:      prefix.Addr().As4(),
+	}, cidrValue{
+		ProtocolMask: uint8(rule.Protocol),
+	})
 }

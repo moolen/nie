@@ -26,10 +26,32 @@ struct {
 } allow_map SEC(".maps");
 
 struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 1024);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__type(key, struct cidr_key);
+	__type(value, struct cidr_value);
+} cidr_allow_map SEC(".maps");
+
+struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, 1 << 24); /* 16 MiB */
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } events SEC(".maps");
+
+static __always_inline int cidr_protocol_allowed(__u8 mask, __u8 protocol)
+{
+	if (mask == NIE_CIDR_PROTOCOL_ANY)
+		return 1;
+	if (protocol == IPPROTO_TCP)
+		return mask & NIE_CIDR_PROTOCOL_TCP;
+	if (protocol == IPPROTO_UDP)
+		return mask & NIE_CIDR_PROTOCOL_UDP;
+	if (protocol == IPPROTO_ICMP)
+		return mask & NIE_CIDR_PROTOCOL_ICMP;
+	return 0;
+}
 
 static __always_inline int parse_ipv4_dport(struct __sk_buff *skb, struct iphdr **out_ip, __u16 *out_dport)
 {
@@ -104,6 +126,14 @@ int nie_egress(struct __sk_buff *skb)
 	/* Copy bytes directly from packet (network order) to match userspace netip.Addr.As4(). */
 	__builtin_memcpy(key.addr, &ip->daddr, sizeof(ip->daddr));
 	key.dport = dport;
+
+	struct cidr_key cidr_key = {
+		.prefixlen = 32,
+	};
+	__builtin_memcpy(cidr_key.addr, &ip->daddr, sizeof(ip->daddr));
+	struct cidr_value *cidr_val = bpf_map_lookup_elem(&cidr_allow_map, &cidr_key);
+	if (cidr_val && cidr_protocol_allowed(cidr_val->protocol_mask, ip->protocol))
+		return TC_ACT_OK;
 
 	struct allow_value *val = bpf_map_lookup_elem(&allow_map, &key);
 	if (!val) {

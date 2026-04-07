@@ -1018,6 +1018,116 @@ func TestBuildRuntimeServiceSkipsHTTPSLifecycleWhenHTTPSDisabled(t *testing.T) {
 	}
 }
 
+func TestBuildRuntimeServicePreloadsCIDRAllowRulesOnStart(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := testConfig(t)
+	cfg.Policy.CIDRAllow = []config.PolicyCIDRAllowRule{
+		{CIDR: "192.0.2.0/24", Protocol: "tcp"},
+		{CIDR: "198.51.100.10/32", Protocol: "udp"},
+		{CIDR: "203.0.113.0/24", Protocol: "any"},
+	}
+
+	cidrWriter := &recordingCIDRAllowWriter{}
+	manager := &fakeEBPFManager{
+		writer:     &captureTrustWriter{},
+		cidrWriter: cidrWriter,
+	}
+
+	svc, _, err := buildRuntimeService(cfg, logger, componentBuilders{
+		newPolicy:         func([]string) (policyAllows, error) { return allowAllPolicy{}, nil },
+		validateInterface: func(string) error { return nil },
+		newEBPFManager: func(config.Config) (ebpfManagerLifecycle, error) {
+			return manager, nil
+		},
+		newRedirectManager: func(config.Config) (runtime.Lifecycle, error) {
+			return &fakeLifecycle{}, nil
+		},
+		newDNSProxy: func(dnsProxyConfig) dns.Handler {
+			return dns.HandlerFunc(func(dns.ResponseWriter, *dns.Msg) {})
+		},
+		newDNSLifecycle: func(string, dns.Handler) runtime.Lifecycle {
+			return &fakeLifecycle{}
+		},
+		newMarkedDialer: func(uint32) (*net.Dialer, error) {
+			return &net.Dialer{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildRuntimeService() error = %v", err)
+	}
+	if svc.CIDRAllow == nil {
+		t.Fatal("svc.CIDRAllow = nil, want lifecycle when cidr_allow rules are configured")
+	}
+
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("svc.Start() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := svc.Stop(context.Background()); err != nil {
+			t.Fatalf("svc.Stop() error = %v", err)
+		}
+	})
+
+	if got, want := cidrWriter.keys(), []string{
+		"192.0.2.0/24|tcp",
+		"198.51.100.10/32|udp",
+		"203.0.113.0/24|any",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("cidrWriter.keys() = %v, want %v", got, want)
+	}
+}
+
+func TestBuildRuntimeServiceFailsClosedWhenCIDRAllowPreloadFails(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := testConfig(t)
+	cfg.Policy.CIDRAllow = []config.PolicyCIDRAllowRule{
+		{CIDR: "192.0.2.0/24", Protocol: "tcp"},
+	}
+
+	boom := errors.New("cidr preload failed")
+	manager := &fakeEBPFManager{
+		writer:     &captureTrustWriter{},
+		cidrWriter: &recordingCIDRAllowWriter{err: boom},
+	}
+
+	svc, _, err := buildRuntimeService(cfg, logger, componentBuilders{
+		newPolicy:         func([]string) (policyAllows, error) { return allowAllPolicy{}, nil },
+		validateInterface: func(string) error { return nil },
+		newEBPFManager: func(config.Config) (ebpfManagerLifecycle, error) {
+			return manager, nil
+		},
+		newRedirectManager: func(config.Config) (runtime.Lifecycle, error) {
+			return &fakeLifecycle{}, nil
+		},
+		newDNSProxy: func(dnsProxyConfig) dns.Handler {
+			return dns.HandlerFunc(func(dns.ResponseWriter, *dns.Msg) {})
+		},
+		newDNSLifecycle: func(string, dns.Handler) runtime.Lifecycle {
+			return &fakeLifecycle{}
+		},
+		newMarkedDialer: func(uint32) (*net.Dialer, error) {
+			return &net.Dialer{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildRuntimeService() error = %v", err)
+	}
+
+	err = svc.Start(context.Background())
+	if err == nil {
+		t.Fatal("svc.Start() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "cidr allow") {
+		t.Fatalf("svc.Start() error = %q, want cidr allow context", err)
+	}
+	if !strings.Contains(err.Error(), boom.Error()) {
+		t.Fatalf("svc.Start() error = %q, want wrapped %q", err, boom.Error())
+	}
+	if manager.stopCalls != 1 {
+		t.Fatalf("manager.stopCalls = %d, want 1 rollback stop", manager.stopCalls)
+	}
+}
+
 func TestRunStopsServiceOnContextCancellation(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := testConfig(t)
@@ -1228,6 +1338,8 @@ type fakeEBPFManager struct {
 
 	writer         ebpf.TrustWriter
 	trustWriterErr error
+	cidrWriter     ebpf.CIDRAllowWriter
+	cidrWriterErr  error
 	reader         ebpf.EventReader
 	eventReaderErr error
 
@@ -1258,6 +1370,16 @@ func (f *fakeEBPFManager) TrustWriter() (ebpf.TrustWriter, error) {
 	return f.writer, nil
 }
 
+func (f *fakeEBPFManager) CIDRAllowWriter() (ebpf.CIDRAllowWriter, error) {
+	if f.cidrWriterErr != nil {
+		return nil, f.cidrWriterErr
+	}
+	if f.cidrWriter == nil {
+		return nil, ebpf.ErrManagerNotStarted
+	}
+	return f.cidrWriter, nil
+}
+
 func (f *fakeEBPFManager) EventReader() (ebpf.EventReader, error) {
 	f.eventReaderCalls++
 	if f.eventReaderErr != nil {
@@ -1284,6 +1406,27 @@ type recordingTrustWriter struct {
 	lastAllowedEntry ebpf.TrustEntry
 	allowErrByKey    map[string]error
 	deleteErrByKey   map[string]error
+}
+
+type recordingCIDRAllowWriter struct {
+	rules []ebpf.CIDRAllowRule
+	err   error
+}
+
+func (w *recordingCIDRAllowWriter) AllowCIDR(_ context.Context, rule ebpf.CIDRAllowRule) error {
+	if w.err != nil {
+		return w.err
+	}
+	w.rules = append(w.rules, rule)
+	return nil
+}
+
+func (w *recordingCIDRAllowWriter) keys() []string {
+	out := make([]string, 0, len(w.rules))
+	for _, rule := range w.rules {
+		out = append(out, rule.Prefix.String()+"|"+rule.Protocol.String())
+	}
+	return out
 }
 
 func (w *recordingTrustWriter) Allow(_ context.Context, entry ebpf.TrustEntry) error {

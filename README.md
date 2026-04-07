@@ -49,24 +49,12 @@ policy:
   cidr_allow:
     - cidr: 10.0.0.0/8
       protocol: tcp
-      ports:
-        - 443
-        - 8443
-        - 10000-10100
     - cidr: 10.20.0.0/16
       protocol: udp
-      ports:
-        - 53
-        - 123
-    - cidr: 10.30.0.0/16
-      protocol: any
-    - cidr: 10.40.0.0/16
+    - cidr: 10.30.0.15
       protocol: icmp
-      icmp:
-        allow:
-          - echo-request
-          - type: 3
-            code: 4
+    - cidr: 10.40.0.0/16
+      protocol: any
 
 https:
   listen: 127.0.0.1:9443
@@ -139,11 +127,19 @@ allows unmatched ICMP but emits `would_deny_egress` logs with `icmp_type`,
 `icmp_code`, and `icmp_metadata_valid`.
 
 `policy.cidr_allow` is a direct egress allow path for IPv4 CIDRs. Matching CIDR
-rules take precedence over DNS-learned hostname trust. `protocol: any` is broad
-and intentionally unqualified. Matching CIDR rules only bypass HTTPS MITM for
-allowed TCP flows to configured intercepted HTTPS ports; UDP to those ports
-still follows the existing non-HTTP deny/audit path. For non-matching non-CIDR
-traffic, `enforce` still drops by default and `audit` still allows and logs.
+rules take precedence over DNS-learned hostname trust and are enforced in the
+tc/eBPF datapath through a longest-prefix-match IPv4 CIDR map. Each rule
+contains only:
+
+- `cidr`: an IPv4 CIDR or plain IPv4 address
+- `protocol`: `tcp`, `udp`, `icmp`, or `any`
+
+Plain IPv4 addresses normalize to `/32` during config loading. This first pass
+does not support port ranges or ICMP type/code qualifiers under
+`policy.cidr_allow`; use the dedicated `icmp.outbound` policy surface for ICMP
+message filtering. `protocol: any` is intentionally broad and allows any IP
+protocol within the matching IPv4 prefix. For non-matching non-CIDR traffic,
+`enforce` still drops by default and `audit` still allows and logs.
 
 `trust` configures how NIE prunes stale DNS-learned destinations. `max_stale_hold`
 adds optional extra time before a stale destination is eligible for removal, and

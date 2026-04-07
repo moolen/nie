@@ -17,6 +17,15 @@ type TrustWriter interface {
 	Allow(ctx context.Context, entry TrustEntry) error
 }
 
+type CIDRAllowRule struct {
+	Prefix   netip.Prefix
+	Protocol CIDRProtocol
+}
+
+type CIDRAllowWriter interface {
+	AllowCIDR(ctx context.Context, rule CIDRAllowRule) error
+}
+
 type TrustDeleter interface {
 	Delete(ctx context.Context, ipv4 netip.Addr, port uint16) error
 }
@@ -73,6 +82,30 @@ func (p EgressProtocol) String() string {
 		return "udp"
 	case EgressProtocolUnknown:
 		return "unknown"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint8(p))
+	}
+}
+
+type CIDRProtocol uint8
+
+const (
+	CIDRProtocolTCP  CIDRProtocol = 1 << 0
+	CIDRProtocolUDP  CIDRProtocol = 1 << 1
+	CIDRProtocolICMP CIDRProtocol = 1 << 2
+	CIDRProtocolAny  CIDRProtocol = 0xff
+)
+
+func (p CIDRProtocol) String() string {
+	switch p {
+	case CIDRProtocolTCP:
+		return "tcp"
+	case CIDRProtocolUDP:
+		return "udp"
+	case CIDRProtocolICMP:
+		return "icmp"
+	case CIDRProtocolAny:
+		return "any"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(p))
 	}

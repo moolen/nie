@@ -5,7 +5,7 @@
 ## Scope
 
 - single host
-- single interface
+- single protected interface
 - IPv4 only in v1
 - classic DNS over UDP/TCP port 53 only
 - learns A records only; AAAA answers are ignored
@@ -23,17 +23,17 @@ The daemon does not use shell-out `iptables`/`tc` orchestration for normal start
 
 ## Configuration
 
-`config.yaml` uses explicit `host:port` listener addresses, a single interface, glob-based hostname policy, HTTPS interception policy, and optional outbound ICMP policy:
+`config.yaml` uses explicit `host:port` listener addresses, selector-based interface and DNS upstream config, glob-based hostname policy, HTTPS interception policy, and optional outbound ICMP policy:
 
 ```yaml
 mode: enforce
-interface: eth0
+interface:
+  mode: auto
 
 dns:
   listen: 127.0.0.1:1053
   upstreams:
-    - 1.1.1.1:53
-    - 9.9.9.9:53
+    mode: auto
   mark: 4242
 
 trust:
@@ -107,6 +107,28 @@ icmp:
         code: 4
 ```
 
+Selector modes:
+
+- `interface.mode: explicit` requires `interface.name`
+- `interface.mode: auto` resolves the protected interface from IPv4 default-route state and fails closed if there is no default route or if multiple default routes use different interfaces
+- `dns.upstreams.mode: explicit` requires `dns.upstreams.addresses`
+- `dns.upstreams.mode: auto` reads usable IPv4 nameservers from `/etc/resolv.conf`, filters loopback / unspecified / IPv6 entries, and fails closed if no usable upstream remains
+
+Explicit examples:
+
+```yaml
+interface:
+  mode: explicit
+  name: eth0
+
+dns:
+  upstreams:
+    mode: explicit
+    addresses:
+      - 1.1.1.1:53
+      - 9.9.9.9:53
+```
+
 If `icmp.outbound` is omitted, NIE keeps the current trust-based ICMP behavior. When
 it is present, outbound ICMPv4 is decided only by the ICMP policy. `default: audit`
 allows unmatched ICMP but emits `would_deny_egress` logs with `icmp_type`,
@@ -148,12 +170,14 @@ Glob semantics:
 5. In `audit`, denied names are still forwarded upstream and logged as `would_deny_dns`.
 6. Relevant A-record answers for the queried hostname, or for names reached through an in-answer CNAME chain, are reconciled into trusted IPv4 entries for the eBPF allow map per hostname over time (not append-only) and only on configured intercepted HTTPS / MITM service ports.
 7. Cleanup is protocol-aware and tunable via `trust.max_stale_hold` and `trust.sweep_interval`: stale UDP destinations age out by DNS lease timing plus any configured stale hold, while stale TCP destinations are removed only after conntrack indicates no active flows, so old TCP destinations may remain trusted briefly while flows drain even with `max_stale_hold: 0s`.
-8. The tc egress program uses `dns.mark` as a bypass mark for proxy-originated DNS traffic.
+8. When more than one DNS upstream is configured or auto-discovered, `nie` tries them in order until one returns a response.
+9. The tc egress program uses `dns.mark` as a bypass mark for proxy-originated DNS traffic.
 
 ## Runtime Lifecycle
 
-- eBPF startup ensures `/sys/fs/bpf` exists and mounts `bpffs` when needed, then prepares `/sys/fs/bpf/nie`, loads objects, configures mode/mark, pins maps, and attaches tc egress on the configured interface.
-- before runtime construction, `nie` validates that the protected interface is IPv4-only and fails closed if IPv6 addresses are assigned.
+- before runtime construction, `nie` resolves `interface.mode` and `dns.upstreams.mode` into concrete runtime values and fails closed on ambiguous or unusable auto-detection.
+- eBPF startup ensures `/sys/fs/bpf` exists and mounts `bpffs` when needed, then prepares `/sys/fs/bpf/nie`, loads objects, configures mode/mark, pins maps, and attaches tc egress on the resolved interface.
+- after resolution, `nie` validates that the protected interface is IPv4-only and fails closed if IPv6 addresses are assigned.
 - Redirect startup detects nftables availability and installs only `nie`-owned DNS redirect rules.
 - On shutdown, `nie` stops DNS first, then removes redirect rules/chains/tables it owns, detaches tc egress, closes objects, removes pinned state under `/sys/fs/bpf/nie`, and removes clsact when it created it.
 - If conflicting preexisting `nie` redirect objects are present, startup/shutdown surfaces explicit errors instead of mutating unknown state.

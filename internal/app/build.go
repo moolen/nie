@@ -44,6 +44,7 @@ type componentBuilders struct {
 	newDNSLifecycle    func(addr string, handler dns.Handler) runtime.Lifecycle
 	newMarkedDialer    func(mark uint32) (*net.Dialer, error)
 	validateInterface  func(iface string) error
+	resolveConfig      func(cfg config.Config) (resolvedRuntimeConfig, error)
 }
 
 type liveTrustReconciler struct {
@@ -135,42 +136,56 @@ func buildComponents(cfg config.Config, logger *slog.Logger, builders componentB
 
 func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders componentBuilders) (runtime.Service, ebpfManagerLifecycle, error) {
 	builders = builders.withDefaults(logger)
-	if err := builders.validateInterface(cfg.Interface); err != nil {
+	resolved, err := builders.resolveConfig(cfg)
+	if err != nil {
+		return runtime.Service{}, nil, fmt.Errorf("resolve runtime config: %w", err)
+	}
+	runtimeCfg := cfg
+	runtimeCfg.Interface = config.InterfaceSelector{
+		Mode: "explicit",
+		Name: resolved.Interface,
+	}
+	runtimeCfg.DNS.Upstreams = config.UpstreamSelector{
+		Mode:      "explicit",
+		Addresses: append([]string(nil), resolved.Upstreams...),
+	}
+
+	if err := builders.validateInterface(runtimeCfg.Interface.Name); err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("validate protected interface: %w", err)
 	}
 
-	p, err := builders.newPolicy(cfg.Policy.Allow)
+	p, err := builders.newPolicy(runtimeCfg.Policy.Allow)
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("build policy: %w", err)
 	}
-	markedDialer, err := builders.newMarkedDialer(uint32(cfg.DNS.Mark))
+	markedDialer, err := builders.newMarkedDialer(uint32(runtimeCfg.DNS.Mark))
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("build marked dialer: %w", err)
 	}
-	if len(cfg.DNS.Upstreams) == 0 {
+	if len(runtimeCfg.DNS.Upstreams.Addresses) == 0 {
 		return runtime.Service{}, nil, fmt.Errorf("load config: dns.upstreams must contain at least one upstream")
 	}
 	upstream := dnsClientUpstream{
-		addr:   cfg.DNS.Upstreams[0],
+		addrs:  append([]string(nil), runtimeCfg.DNS.Upstreams.Addresses...),
 		dialer: markedDialer,
 	}
 
-	ebpfMgr, err := builders.newEBPFManager(cfg)
+	ebpfMgr, err := builders.newEBPFManager(runtimeCfg)
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("build ebpf manager: %w", err)
 	}
-	redirectMgr, err := builders.newRedirectManager(cfg)
+	redirectMgr, err := builders.newRedirectManager(runtimeCfg)
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("build redirect manager: %w", err)
 	}
 
-	trustPlan, err := policy.NewTrustPlan(cfg.Policy.Allow, httpsTrustedPorts(cfg.HTTPS.Ports), mitmTrustRules(cfg.HTTPS.MITM.Rules))
+	trustPlan, err := policy.NewTrustPlan(runtimeCfg.Policy.Allow, httpsTrustedPorts(runtimeCfg.HTTPS.Ports), mitmTrustRules(runtimeCfg.HTTPS.MITM.Rules))
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("build dns trust plan: %w", err)
 	}
 	trustService := trustsync.New(trustsync.ServiceConfig{
-		MaxStaleHold:  cfg.Trust.MaxStaleHold,
-		SweepInterval: cfg.Trust.SweepInterval,
+		MaxStaleHold:  runtimeCfg.Trust.MaxStaleHold,
+		SweepInterval: runtimeCfg.Trust.SweepInterval,
 		Deleter:       liveTrustDeleter{source: ebpfMgr},
 		Refresher:     liveTrustRefresher{source: ebpfMgr},
 	})
@@ -178,22 +193,22 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 		source: ebpfMgr,
 		sync:   trustService,
 	}
-	httpPolicy, err := httppolicy.New(mitmHTTPRules(cfg.HTTPS.MITM.Rules))
+	httpPolicy, err := httppolicy.New(mitmHTTPRules(runtimeCfg.HTTPS.MITM.Rules))
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("build https mitm policy: %w", err)
 	}
 	authority, err := mitm.EnsureCA(mitm.CAPaths{
-		CertFile: cfg.HTTPS.CA.CertFile,
-		KeyFile:  cfg.HTTPS.CA.KeyFile,
+		CertFile: runtimeCfg.HTTPS.CA.CertFile,
+		KeyFile:  runtimeCfg.HTTPS.CA.KeyFile,
 	})
 	if err != nil {
 		return runtime.Service{}, nil, fmt.Errorf("ensure https mitm ca: %w", err)
 	}
 	leafCache := mitm.NewLeafCache(authority, nil)
 	httpsProxy, err := mitm.NewProxy(mitm.ProxyConfig{
-		Mode:             cfg.Mode,
-		MissingSNIAction: httppolicy.Action(cfg.HTTPS.SNI.Missing),
-		DefaultAction:    httppolicy.Action(cfg.HTTPS.MITM.Default),
+		Mode:             runtimeCfg.Mode,
+		MissingSNIAction: httppolicy.Action(runtimeCfg.HTTPS.SNI.Missing),
+		DefaultAction:    httppolicy.Action(runtimeCfg.HTTPS.MITM.Default),
 	}, mitm.ProxyDependencies{
 		Logger:           logger,
 		MITMPolicy:       httpPolicy,
@@ -231,7 +246,7 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 		return runtime.Service{}, nil, fmt.Errorf("build https proxy: %w", err)
 	}
 	httpsService, err := mitm.NewService(mitm.ServiceConfig{
-		ListenAddr: cfg.HTTPS.Listen,
+		ListenAddr: runtimeCfg.HTTPS.Listen,
 	}, mitm.ServiceDependencies{
 		Handler: httpsProxy,
 	})
@@ -240,14 +255,14 @@ func buildRuntimeService(cfg config.Config, logger *slog.Logger, builders compon
 	}
 
 	dnsHandler := builders.newDNSProxy(dnsProxyConfig{
-		Mode:       cfg.Mode,
+		Mode:       runtimeCfg.Mode,
 		Policy:     p,
 		TrustPlan:  trustPlan,
 		Upstream:   upstream,
 		Reconciler: trustReconciler,
 		Logger:     logger,
 	})
-	dnsLC := builders.newDNSLifecycle(cfg.DNS.Listen, dnsHandler)
+	dnsLC := builders.newDNSLifecycle(runtimeCfg.DNS.Listen, dnsHandler)
 
 	return runtime.Service{
 		Redirect: redirectMgr,
@@ -267,7 +282,7 @@ func (b componentBuilders) withDefaults(logger *slog.Logger) componentBuilders {
 	if b.newEBPFManager == nil {
 		b.newEBPFManager = func(cfg config.Config) (ebpfManagerLifecycle, error) {
 			return ebpf.NewManager(ebpf.ManagerConfig{
-				Interface:  cfg.Interface,
+				Interface:  cfg.Interface.Name,
 				Mode:       cfg.Mode,
 				BypassMark: uint32(cfg.DNS.Mark),
 			}, ebpf.Dependencies{})
@@ -319,6 +334,11 @@ func (b componentBuilders) withDefaults(logger *slog.Logger) componentBuilders {
 	}
 	if b.validateInterface == nil {
 		b.validateInterface = validateProtectedInterface
+	}
+	if b.resolveConfig == nil {
+		b.resolveConfig = func(cfg config.Config) (resolvedRuntimeConfig, error) {
+			return resolveRuntimeConfig(context.Background(), cfg, resolverDeps{})
+		}
 	}
 	return b
 }

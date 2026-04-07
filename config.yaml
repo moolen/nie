@@ -1,9 +1,10 @@
 mode: enforce
-interface: eth0
+interface:
+  mode: auto
 dns:
   listen: 127.0.0.1:1053
   upstreams:
-    - 1.1.1.1:53
+    mode: auto
   mark: 4242
 trust:
   max_stale_hold: 0s
@@ -13,3 +14,6 @@ policy:
   allow:
     - "*.github.com"
     - github.com
+https:
+  ports:
+    - 443

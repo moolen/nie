@@ -313,7 +313,7 @@ func TestDNSClientUpstreamExchange(t *testing.T) {
 	defer cancel()
 
 	upstream := dnsClientUpstream{
-		addr:   pc.LocalAddr().String(),
+		addrs:  []string{pc.LocalAddr().String()},
 		dialer: &net.Dialer{},
 	}
 	resp, err := upstream.Exchange(ctx, req)
@@ -329,6 +329,80 @@ func TestDNSClientUpstreamExchange(t *testing.T) {
 	}
 	if got := record.A.String(); got != "192.0.2.55" {
 		t.Fatalf("record.A = %s, want 192.0.2.55", got)
+	}
+}
+
+func TestDNSClientUpstreamExchangeFallsBackToNextUpstream(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket(udp) error = %v", err)
+	}
+
+	server := &dns.Server{
+		PacketConn: pc,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			resp.Answer = append(resp.Answer, &dns.A{
+				Hdr: dns.RR_Header{
+					Name:   req.Question[0].Name,
+					Rrtype: dns.TypeA,
+					Class:  dns.ClassINET,
+					Ttl:    30,
+				},
+				A: net.IPv4(192, 0, 2, 99),
+			})
+			_ = w.WriteMsg(resp)
+		}),
+	}
+	go func() { _ = server.ActivateAndServe() }()
+	t.Cleanup(func() {
+		_ = server.ShutdownContext(context.Background())
+	})
+
+	req := new(dns.Msg)
+	req.SetQuestion("example.com.", dns.TypeA)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	upstream := dnsClientUpstream{
+		addrs:  []string{"missing-port", pc.LocalAddr().String()},
+		dialer: &net.Dialer{},
+	}
+	resp, err := upstream.Exchange(ctx, req)
+	if err != nil {
+		t.Fatalf("Exchange() error = %v", err)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("len(resp.Answer) = %d, want 1", len(resp.Answer))
+	}
+	record, ok := resp.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatalf("resp.Answer[0] type = %T, want *dns.A", resp.Answer[0])
+	}
+	if got := record.A.String(); got != "192.0.2.99" {
+		t.Fatalf("record.A = %s, want 192.0.2.99", got)
+	}
+}
+
+func TestDNSClientUpstreamExchangeReturnsErrorWhenAllUpstreamsFail(t *testing.T) {
+	req := new(dns.Msg)
+	req.SetQuestion("example.com.", dns.TypeA)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	upstream := dnsClientUpstream{
+		addrs:  []string{"missing-port", "still-missing-port"},
+		dialer: &net.Dialer{},
+	}
+	resp, err := upstream.Exchange(ctx, req)
+	if err == nil {
+		t.Fatal("Exchange() error = nil, want non-nil")
+	}
+	if resp != nil {
+		t.Fatalf("resp = %#v, want nil", resp)
 	}
 }
 
@@ -768,8 +842,8 @@ func TestBuildRuntimeServiceFailsClosedOnIPv6Interface(t *testing.T) {
 
 	_, _, err := buildRuntimeService(cfg, logger, componentBuilders{
 		validateInterface: func(iface string) error {
-			if iface != cfg.Interface {
-				t.Fatalf("validateInterface() iface = %q, want %q", iface, cfg.Interface)
+			if iface != cfg.Interface.Name {
+				t.Fatalf("validateInterface() iface = %q, want %q", iface, cfg.Interface.Name)
 			}
 			return boom
 		},
@@ -782,6 +856,74 @@ func TestBuildRuntimeServiceFailsClosedOnIPv6Interface(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), boom.Error()) {
 		t.Fatalf("buildRuntimeService() error = %q, want wrapped %q", err, boom.Error())
+	}
+}
+
+func TestBuildRuntimeServiceUsesResolvedInterface(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := testConfig(t)
+	cfg.Interface = config.InterfaceSelector{Mode: "auto"}
+
+	_, _, err := buildRuntimeService(cfg, logger, componentBuilders{
+		resolveConfig: func(config.Config) (resolvedRuntimeConfig, error) {
+			return resolvedRuntimeConfig{
+				Interface: "ens5",
+				Upstreams: []string{"1.1.1.1:53"},
+			}, nil
+		},
+		validateInterface: func(iface string) error {
+			if iface != "ens5" {
+				t.Fatalf("validateInterface() iface = %q, want %q", iface, "ens5")
+			}
+			return errors.New("boom")
+		},
+	})
+	if err == nil {
+		t.Fatal("buildRuntimeService() error = nil, want non-nil")
+	}
+}
+
+func TestBuildRuntimeServiceUsesResolvedDNSUpstreams(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := testConfig(t)
+	cfg.DNS.Upstreams = config.UpstreamSelector{Mode: "auto"}
+
+	var captured dnsClientUpstream
+	_, _, err := buildRuntimeService(cfg, logger, componentBuilders{
+		resolveConfig: func(config.Config) (resolvedRuntimeConfig, error) {
+			return resolvedRuntimeConfig{
+				Interface: "eth0",
+				Upstreams: []string{"1.1.1.1:53", "9.9.9.9:53"},
+			}, nil
+		},
+		newPolicy:         func([]string) (policyAllows, error) { return allowAllPolicy{}, nil },
+		validateInterface: func(string) error { return nil },
+		newEBPFManager: func(config.Config) (ebpfManagerLifecycle, error) {
+			return &fakeEBPFManager{writer: &captureTrustWriter{}}, nil
+		},
+		newRedirectManager: func(config.Config) (runtime.Lifecycle, error) {
+			return &fakeLifecycle{}, nil
+		},
+		newDNSProxy: func(cfg dnsProxyConfig) dns.Handler {
+			upstream, ok := cfg.Upstream.(dnsClientUpstream)
+			if !ok {
+				t.Fatalf("cfg.Upstream type = %T, want dnsClientUpstream", cfg.Upstream)
+			}
+			captured = upstream
+			return dns.HandlerFunc(func(dns.ResponseWriter, *dns.Msg) {})
+		},
+		newDNSLifecycle: func(string, dns.Handler) runtime.Lifecycle {
+			return &fakeLifecycle{}
+		},
+		newMarkedDialer: func(uint32) (*net.Dialer, error) {
+			return &net.Dialer{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildRuntimeService() error = %v", err)
+	}
+	if got, want := captured.addrs, []string{"1.1.1.1:53", "9.9.9.9:53"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("captured.addrs = %v, want %v", got, want)
 	}
 }
 
@@ -1158,12 +1300,18 @@ func testConfig(t *testing.T) config.Config {
 
 	caDir := t.TempDir()
 	return config.Config{
-		Mode:      config.ModeEnforce,
-		Interface: "eth0",
+		Mode: config.ModeEnforce,
+		Interface: config.InterfaceSelector{
+			Mode: "explicit",
+			Name: "eth0",
+		},
 		DNS: config.DNS{
-			Listen:    "127.0.0.1:5353",
-			Upstreams: []string{"1.1.1.1:53"},
-			Mark:      1234,
+			Listen: "127.0.0.1:5353",
+			Upstreams: config.UpstreamSelector{
+				Mode:      "explicit",
+				Addresses: []string{"1.1.1.1:53"},
+			},
+			Mark: 1234,
 		},
 		Policy: config.Policy{
 			Default: "deny",

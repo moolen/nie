@@ -59,14 +59,23 @@ func (d *dnsListenerLifecycle) Stop(ctx context.Context) error {
 }
 
 type dnsClientUpstream struct {
-	addr   string
+	addrs  []string
 	dialer *net.Dialer
 }
 
 func (u dnsClientUpstream) Exchange(ctx context.Context, req *dns.Msg) (*dns.Msg, error) {
 	c := &dns.Client{Dialer: u.dialer}
-	resp, _, err := c.ExchangeContext(ctx, req, u.addr)
-	return resp, err
+	var firstErr error
+	for _, addr := range u.addrs {
+		resp, _, err := c.ExchangeContext(ctx, req, addr)
+		if err == nil && resp != nil {
+			return resp, nil
+		}
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return nil, firstErr
 }
 
 var _ runtime.Lifecycle = (*dnsListenerLifecycle)(nil)

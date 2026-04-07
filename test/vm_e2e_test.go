@@ -461,11 +461,15 @@ func writeVMConfig(t *testing.T, path, mode, iface, listenAddr, httpsListenAddr,
 	}
 
 	raw := fmt.Sprintf(`mode: %s
-interface: %s
+interface:
+  mode: explicit
+  name: %s
 dns:
   listen: %s
   upstreams:
-    - %s
+    mode: explicit
+    addresses:
+      - %s
   mark: 4242
 policy:
   default: deny

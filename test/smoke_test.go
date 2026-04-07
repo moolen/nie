@@ -1182,11 +1182,15 @@ func writeConfig(t *testing.T, path string, opts writeConfigOptions) {
 	}
 
 	raw := fmt.Sprintf(`mode: %s
-interface: %s
+interface:
+  mode: explicit
+  name: %s
 dns:
   listen: %s
   upstreams:
-    - %s
+    mode: explicit
+    addresses:
+      - %s
   mark: 4242
 policy:
   default: deny

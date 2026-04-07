@@ -21,18 +21,28 @@ const (
 )
 
 type Config struct {
-	Mode      Mode   `yaml:"mode"`
-	Interface string `yaml:"interface"`
-	DNS       DNS    `yaml:"dns"`
-	Policy    Policy `yaml:"policy"`
-	HTTPS     HTTPS  `yaml:"https"`
-	Trust     Trust  `yaml:"trust"`
+	Mode      Mode              `yaml:"mode"`
+	Interface InterfaceSelector `yaml:"interface"`
+	DNS       DNS               `yaml:"dns"`
+	Policy    Policy            `yaml:"policy"`
+	HTTPS     HTTPS             `yaml:"https"`
+	Trust     Trust             `yaml:"trust"`
+}
+
+type InterfaceSelector struct {
+	Mode string `yaml:"mode"`
+	Name string `yaml:"name"`
 }
 
 type DNS struct {
-	Listen    string   `yaml:"listen"`
-	Upstreams []string `yaml:"upstreams"`
-	Mark      int      `yaml:"mark"`
+	Listen    string           `yaml:"listen"`
+	Upstreams UpstreamSelector `yaml:"upstreams"`
+	Mark      int              `yaml:"mark"`
+}
+
+type UpstreamSelector struct {
+	Mode      string   `yaml:"mode"`
+	Addresses []string `yaml:"addresses"`
 }
 
 type Policy struct {
@@ -137,7 +147,8 @@ func Load(raw []byte) (Config, error) {
 
 func (c *Config) Validate() error {
 	c.Mode = Mode(strings.TrimSpace(string(c.Mode)))
-	c.Interface = strings.TrimSpace(c.Interface)
+	c.Interface.Mode = strings.TrimSpace(c.Interface.Mode)
+	c.Interface.Name = strings.TrimSpace(c.Interface.Name)
 	c.DNS.Listen = strings.TrimSpace(c.DNS.Listen)
 	c.Policy.Default = strings.TrimSpace(c.Policy.Default)
 	c.HTTPS.Listen = strings.TrimSpace(c.HTTPS.Listen)
@@ -145,6 +156,7 @@ func (c *Config) Validate() error {
 	c.HTTPS.CA.CertFile = strings.TrimSpace(c.HTTPS.CA.CertFile)
 	c.HTTPS.CA.KeyFile = strings.TrimSpace(c.HTTPS.CA.KeyFile)
 	c.HTTPS.MITM.Default = strings.TrimSpace(c.HTTPS.MITM.Default)
+	c.DNS.Upstreams.Mode = strings.TrimSpace(c.DNS.Upstreams.Mode)
 
 	if c.HTTPS.Listen == "" {
 		c.HTTPS.Listen = "127.0.0.1:9443"
@@ -174,8 +186,8 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	for i, upstream := range c.DNS.Upstreams {
-		c.DNS.Upstreams[i] = strings.TrimSpace(upstream)
+	for i, upstream := range c.DNS.Upstreams.Addresses {
+		c.DNS.Upstreams.Addresses[i] = strings.TrimSpace(upstream)
 	}
 
 	switch c.Mode {
@@ -183,8 +195,17 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("invalid mode %q", c.Mode)
 	}
-	if c.Interface == "" {
-		return errors.New("interface must be set")
+	switch c.Interface.Mode {
+	case "explicit":
+		if c.Interface.Name == "" {
+			return errors.New("interface.name must be set when interface.mode=explicit")
+		}
+	case "auto":
+		if c.Interface.Name != "" {
+			return errors.New("interface.name must be empty when interface.mode=auto")
+		}
+	default:
+		return errors.New("interface.mode must be one of explicit or auto")
 	}
 	if c.DNS.Listen == "" {
 		return errors.New("dns.listen must be set")
@@ -192,16 +213,25 @@ func (c *Config) Validate() error {
 	if err := validateHostPort("dns.listen", c.DNS.Listen); err != nil {
 		return err
 	}
-	if len(c.DNS.Upstreams) == 0 {
-		return errors.New("dns.upstreams must contain at least one upstream")
-	}
-	for i, upstream := range c.DNS.Upstreams {
-		if upstream == "" {
-			return fmt.Errorf("dns.upstreams[%d] must not be empty", i)
+	switch c.DNS.Upstreams.Mode {
+	case "explicit":
+		if len(c.DNS.Upstreams.Addresses) == 0 {
+			return errors.New("dns.upstreams.addresses must contain at least one upstream when dns.upstreams.mode=explicit")
 		}
-		if err := validateHostPort(fmt.Sprintf("dns.upstreams[%d]", i), upstream); err != nil {
-			return err
+		for i, upstream := range c.DNS.Upstreams.Addresses {
+			if upstream == "" {
+				return fmt.Errorf("dns.upstreams.addresses[%d] must not be empty", i)
+			}
+			if err := validateHostPort(fmt.Sprintf("dns.upstreams.addresses[%d]", i), upstream); err != nil {
+				return err
+			}
 		}
+	case "auto":
+		if len(c.DNS.Upstreams.Addresses) != 0 {
+			return errors.New("dns.upstreams.addresses must be empty when dns.upstreams.mode=auto")
+		}
+	default:
+		return errors.New("dns.upstreams.mode must be one of explicit or auto")
 	}
 	if c.DNS.Mark <= 0 {
 		return errors.New("dns.mark must be a positive non-zero value")

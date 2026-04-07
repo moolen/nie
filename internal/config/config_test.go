@@ -7,13 +7,266 @@ import (
 	"time"
 )
 
+func TestLoadConfig_InterfaceSelectorExplicit(t *testing.T) {
+	raw := []byte(`
+mode: enforce
+interface:
+  mode: explicit
+  name: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+`)
+
+	cfg, err := Load(raw)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Interface.Mode != "explicit" {
+		t.Fatalf("Interface.Mode = %q, want %q", cfg.Interface.Mode, "explicit")
+	}
+	if cfg.Interface.Name != "eth0" {
+		t.Fatalf("Interface.Name = %q, want %q", cfg.Interface.Name, "eth0")
+	}
+}
+
+func TestLoadConfig_InterfaceSelectorAuto(t *testing.T) {
+	raw := []byte(`
+mode: enforce
+interface:
+  mode: auto
+dns:
+  listen: 127.0.0.1:1053
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+`)
+
+	cfg, err := Load(raw)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Interface.Mode != "auto" {
+		t.Fatalf("Interface.Mode = %q, want %q", cfg.Interface.Mode, "auto")
+	}
+	if cfg.Interface.Name != "" {
+		t.Fatalf("Interface.Name = %q, want empty", cfg.Interface.Name)
+	}
+}
+
+func TestLoadConfig_DNSUpstreamsSelectorExplicit(t *testing.T) {
+	raw := []byte(`
+mode: enforce
+interface:
+  mode: explicit
+  name: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams:
+    mode: explicit
+    addresses: [" 1.1.1.1:53 ", " 9.9.9.9:53 "]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+`)
+
+	cfg, err := Load(raw)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DNS.Upstreams.Mode != "explicit" {
+		t.Fatalf("DNS.Upstreams.Mode = %q, want %q", cfg.DNS.Upstreams.Mode, "explicit")
+	}
+	if got, want := cfg.DNS.Upstreams.Addresses, []string{"1.1.1.1:53", "9.9.9.9:53"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("DNS.Upstreams.Addresses = %#v, want %#v", got, want)
+	}
+}
+
+func TestLoadConfig_DNSUpstreamsSelectorAuto(t *testing.T) {
+	raw := []byte(`
+mode: enforce
+interface:
+  mode: explicit
+  name: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams:
+    mode: auto
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+`)
+
+	cfg, err := Load(raw)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DNS.Upstreams.Mode != "auto" {
+		t.Fatalf("DNS.Upstreams.Mode = %q, want %q", cfg.DNS.Upstreams.Mode, "auto")
+	}
+	if len(cfg.DNS.Upstreams.Addresses) != 0 {
+		t.Fatalf("DNS.Upstreams.Addresses = %#v, want empty", cfg.DNS.Upstreams.Addresses)
+	}
+}
+
+func TestLoadConfig_RejectsInterfaceSelectorWithoutMode(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface:
+  name: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "interface.mode") {
+		t.Fatalf("Load() error = %v, want interface.mode context", err)
+	}
+}
+
+func TestLoadConfig_RejectsExplicitInterfaceWithoutName(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface:
+  mode: explicit
+dns:
+  listen: 127.0.0.1:1053
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "interface.name") {
+		t.Fatalf("Load() error = %v, want interface.name context", err)
+	}
+}
+
+func TestLoadConfig_RejectsAutoInterfaceWithName(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface:
+  mode: auto
+  name: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "interface.name") {
+		t.Fatalf("Load() error = %v, want interface.name context", err)
+	}
+}
+
+func TestLoadConfig_RejectsExplicitDNSUpstreamsWithoutAddresses(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface:
+  mode: explicit
+  name: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams:
+    mode: explicit
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "dns.upstreams.addresses") {
+		t.Fatalf("Load() error = %v, want dns.upstreams.addresses context", err)
+	}
+}
+
+func TestLoadConfig_RejectsAutoDNSUpstreamsWithAddresses(t *testing.T) {
+	_, err := Load([]byte(`
+mode: enforce
+interface:
+  mode: explicit
+  name: eth0
+dns:
+  listen: 127.0.0.1:1053
+  upstreams:
+    mode: auto
+    addresses: [1.1.1.1:53]
+  mark: 4242
+policy:
+  default: deny
+  allow: ["github.com"]
+https:
+  ports: [443]
+`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "dns.upstreams.addresses") {
+		t.Fatalf("Load() error = %v, want dns.upstreams.addresses context", err)
+	}
+}
+
 func TestLoadConfig_Valid(t *testing.T) {
 	raw := []byte(`
 mode: audit
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -34,10 +287,14 @@ https:
 func TestLoadConfig_HTTPSDefaults(t *testing.T) {
 	raw := []byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -68,10 +325,14 @@ https:
 func baseConfigWithHTTPS(httpsBlock string) []byte {
 	return []byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -84,10 +345,14 @@ https:
 func TestLoadConfig_RejectsMissingHTTPSBlock(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -104,10 +369,14 @@ policy:
 func TestLoadConfig_RejectsEmptyHTTPSBlock(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -272,10 +541,14 @@ func TestLoadConfig_RejectsMissingInterface(t *testing.T) {
 func TestLoadConfig_DefaultsPolicyAllowToEmptySlice(t *testing.T) {
 	raw := []byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -308,10 +581,14 @@ func TestLoadConfig_RejectsEmptyOrWhitespaceUpstreamEntries(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			raw := []byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: ` + tt.upstreams + `
+  upstreams:
+    mode: explicit
+    addresses: ` + tt.upstreams + `
   mark: 4242
 policy:
   default: deny
@@ -329,11 +606,15 @@ policy:
 func TestLoadConfig_RejectsUnknownYAMLKeys(t *testing.T) {
 	raw := []byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 unknown: true
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -352,10 +633,14 @@ policy:
 func TestLoadConfig_TrimsStringFields(t *testing.T) {
 	raw := []byte(`
 mode: enforce
-interface: "  eth0  "
+interface:
+  mode: explicit
+  name: "  eth0  "
 dns:
   listen: " 127.0.0.1:1053  "
-  upstreams: [" 1.1.1.1:53  ", " 9.9.9.9:53 "]
+  upstreams:
+    mode: explicit
+    addresses: [" 1.1.1.1:53  ", " 9.9.9.9:53 "]
   mark: 4242
 policy:
   default: deny
@@ -368,14 +653,14 @@ https:
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.Interface != "eth0" {
-		t.Fatalf("Interface = %q, want %q", cfg.Interface, "eth0")
+	if cfg.Interface.Name != "eth0" {
+		t.Fatalf("Interface.Name = %q, want %q", cfg.Interface.Name, "eth0")
 	}
 	if cfg.DNS.Listen != "127.0.0.1:1053" {
 		t.Fatalf("DNS.Listen = %q, want %q", cfg.DNS.Listen, "127.0.0.1:1053")
 	}
-	if cfg.DNS.Upstreams[0] != "1.1.1.1:53" || cfg.DNS.Upstreams[1] != "9.9.9.9:53" {
-		t.Fatalf("DNS.Upstreams = %#v, want trimmed entries", cfg.DNS.Upstreams)
+	if cfg.DNS.Upstreams.Addresses[0] != "1.1.1.1:53" || cfg.DNS.Upstreams.Addresses[1] != "9.9.9.9:53" {
+		t.Fatalf("DNS.Upstreams.Addresses = %#v, want trimmed entries", cfg.DNS.Upstreams.Addresses)
 	}
 	if cfg.Policy.Allow[0] != "*.github.com" || cfg.Policy.Allow[1] != "github.com" {
 		t.Fatalf("Policy.Allow = %#v, want trimmed entries", cfg.Policy.Allow)
@@ -391,10 +676,14 @@ func TestLoadConfig_RejectsWhitespaceOnlyStringFields(t *testing.T) {
 			name: "interface",
 			config: `
 mode: enforce
-interface: "   "
+interface:
+  mode: explicit
+  name: "   "
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -405,10 +694,14 @@ policy:
 			name: "dns.listen",
 			config: `
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: "   "
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -419,10 +712,14 @@ policy:
 			name: "dns.upstreams entry",
 			config: `
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53, "   "]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53, "   "]
   mark: 4242
 policy:
   default: deny
@@ -433,10 +730,14 @@ policy:
 			name: "policy.allow entry",
 			config: `
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -458,10 +759,14 @@ policy:
 func TestLoadConfig_RejectsInvalidMode(t *testing.T) {
 	_, err := Load([]byte(`
 mode: monitor
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -477,9 +782,13 @@ https:
 func TestLoadConfig_RejectsMissingDNSListen(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -499,7 +808,9 @@ func TestLoadConfig_RejectsMissingOrEmptyDNSUpstreams(t *testing.T) {
 			name: "missing",
 			config: `
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
   mark: 4242
@@ -512,7 +823,9 @@ policy:
 			name: "empty",
 			config: `
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
   upstreams: []
@@ -537,10 +850,14 @@ policy:
 func TestLoadConfig_RejectsInvalidPolicyDefault(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: allow
@@ -554,10 +871,14 @@ policy:
 func TestLoadConfig_RejectsNestedUnknownYAMLKeys(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
   unknownNested: true
 policy:
@@ -578,10 +899,14 @@ func TestLoadConfig_RejectsTrailingYAMLDocumentsOrContent(t *testing.T) {
 			name: "multi-document",
 			raw: `
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -594,10 +919,14 @@ mode: audit
 			name: "trailing-content",
 			raw: `
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -620,10 +949,14 @@ true
 func TestLoadConfig_TrimsModeAndPolicyDefault(t *testing.T) {
 	cfg, err := Load([]byte(`
 mode: " enforce "
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: " deny "
@@ -658,10 +991,14 @@ func TestLoadConfig_RejectsMissingOrZeroDNSMark(t *testing.T) {
 			name: "missing",
 			config: `
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
 policy:
   default: deny
   allow: ["github.com"]
@@ -671,10 +1008,14 @@ policy:
 			name: "zero",
 			config: `
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 0
 policy:
   default: deny
@@ -696,10 +1037,14 @@ policy:
 func TestLoadConfig_AcceptsPositiveDNSMark(t *testing.T) {
 	cfg, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -719,10 +1064,14 @@ func TestLoadConfig_RejectsDuplicateTopLevelKeys(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
 mode: audit
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -741,11 +1090,15 @@ https:
 func TestLoadConfig_RejectsDuplicateNestedKeys(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
   listen: 0.0.0.0:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -776,10 +1129,14 @@ func TestLoadConfig_RejectsInvalidDNSListenHostPort(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			raw := []byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: ` + tt.listen + `
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -817,10 +1174,14 @@ func TestLoadConfig_RejectsInvalidDNSUpstreamsHostPort(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			raw := []byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [` + tt.upstream + `]
+  upstreams:
+    mode: explicit
+    addresses: [` + tt.upstream + `]
   mark: 4242
 policy:
   default: deny
@@ -844,10 +1205,14 @@ policy:
 func TestLoadConfig_AcceptsValidDNSHostPortValues(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: dns.local:1053
-  upstreams: [1.1.1.1:53, dns.google:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53, dns.google:53]
   mark: 4242
 policy:
   default: deny
@@ -880,10 +1245,14 @@ func TestLoadConfig_PolicyAllowNullOrEmptyYieldsNonNilSlice(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -907,10 +1276,14 @@ https:
 func TestLoadConfig_RejectsDNSListenBindAllWithoutExplicitHost(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: ":1053"
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -927,10 +1300,14 @@ policy:
 func TestLoadConfig_InvalidDNSUpstreamErrorMentionsEntryIndex(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53, 1.1.1.1]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53, 1.1.1.1]
   mark: 4242
 policy:
   default: deny
@@ -939,18 +1316,22 @@ policy:
 	if err == nil {
 		t.Fatal("Load() error = nil, want validation error")
 	}
-	if !strings.Contains(err.Error(), "dns.upstreams[1]") {
-		t.Fatalf("Load() error = %v, want failing upstream index in error", err)
+	if !strings.Contains(err.Error(), "dns.upstreams.addresses[1]") {
+		t.Fatalf("Load() error = %v, want failing upstream address index in error", err)
 	}
 }
 
 func TestLoadConfig_InvalidPolicyAllowErrorMentionsEntryIndex(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -967,10 +1348,14 @@ policy:
 func TestLoadConfig_AcceptsTrustDurations(t *testing.T) {
 	cfg, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -995,10 +1380,14 @@ trust:
 func TestLoadConfig_RejectsNegativeTrustMaxStaleHold(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -1019,10 +1408,14 @@ trust:
 func TestLoadConfig_RejectsNegativeTrustSweepInterval(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -1043,10 +1436,14 @@ trust:
 func TestLoadConfig_RejectsMalformedTrustMaxStaleHold(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
@@ -1067,10 +1464,14 @@ trust:
 func TestLoadConfig_RejectsMalformedTrustSweepInterval(t *testing.T) {
 	_, err := Load([]byte(`
 mode: enforce
-interface: eth0
+interface:
+  mode: explicit
+  name: eth0
 dns:
   listen: 127.0.0.1:1053
-  upstreams: [1.1.1.1:53]
+  upstreams:
+    mode: explicit
+    addresses: [1.1.1.1:53]
   mark: 4242
 policy:
   default: deny
